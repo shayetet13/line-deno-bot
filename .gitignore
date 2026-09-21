@@ -1,0 +1,52 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# coverage
+coverage/
+*.lcov
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# LINE account sessions — these ARE the credentials. Never commit.
+.sessions/
+*.linejs.json
+
+# local launcher config: server host + ssh credentials
+start.local.ps1
+
+# real bot configs name private rooms and senders; only the example is tracked
+config/bots/*.json
+!config/bots/*.example.json
+
+# local databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.control/users.json
+.control/users.json.tmp-*
+.control/bot-users/
+.control/instances/
+.claude/
+
+# logs
+logs/
+*.log
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
+
+# runtime traces (may contain room ids)
+bench/**/out/
+traces/

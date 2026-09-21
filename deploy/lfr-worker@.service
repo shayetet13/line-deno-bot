@@ -1,0 +1,31 @@
+[Unit]
+Description=line-first-response isolated bot %i
+Documentation=file:///opt/line-first-response/current/docs/runbook.md
+After=network-online.target chronyd.service
+Wants=network-online.target chronyd.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/line-first-response/current
+Environment=PATH=/root/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/opt/line-first-response/.env
+ExecStart=/bin/bash /opt/line-first-response/current/deploy/run-bot-instance.sh %i
+
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lfr-%i
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/line-first-response
+
+[Install]
+WantedBy=multi-user.target

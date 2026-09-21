@@ -1,0 +1,13 @@
+.DS_Store
+sandbox
+.env
+node_modules
+deno.lock
+docs/vitepress/cache
+verify_v2_7.ts
+qr_login.png
+apks/
+decompiled/
+*.apk
+*.apkm
+scripts/__pycache__/

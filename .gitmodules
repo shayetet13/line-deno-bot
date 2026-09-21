@@ -1,0 +1,3 @@
+[submodule "vendor/linejs"]
+	path = vendor/linejs
+	url = https://github.com/shayetet13/linejs.git

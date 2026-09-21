@@ -1,0 +1,32 @@
+{
+  "botId": "bot-1",
+  "ownerId": "owner-1",
+
+  "talk": false,
+  "square": true,
+
+  "dedicatedRooms": ["mbfdcf56614216f79bb1a94f0c7458846"],
+  "slotBudget": 4,
+
+  "allowedSenders": null,
+
+  "rules": [
+    {
+      "id": "example-exact",
+      "priority": 100,
+      "kind": "exact",
+      "pattern": "ping",
+      "reply": "pong"
+    }
+  ],
+
+  "dryRun": true,
+  "lanes": 6,
+  "sendReservedLanes": 2,
+  "sendSpareLanes": 1,
+  "fastRouteThresholdMs": 23,
+  "warmIntervalMs": 15000,
+  "pollIntervalMs": 0,
+  "pollQuietMs": 20,
+  "squarePollRaceWidth": 1
+}
