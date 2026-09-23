@@ -1,0 +1,131 @@
+name: linebot-vps3
+
+# vps3 self-fronts (2026-09-22 decision — reverted from the AWS-edge design):
+# `backend` is the worker console, `front` is nginx (TLS + reverse proxy),
+# both on this one host, network_mode: host, `front` reaching `backend`
+# over 127.0.0.1 — no tunnel, no separate edge host. The original
+# deploy/nginx-dashboard.conf never had TLS (plain HTTP on :80); `front`
+# adds a self-signed cert on top of that same reverse-proxy design.
+#
+# CPU: deliberately NOT shared/limited/pinned — no cpus, cpu_shares, cpuset,
+# cpu_quota, SYS_NICE or taskset/IRQ affinity (the `cpu-affinity-irq`
+# experiment in apps/worker/src/experiments stays off). This host has 1
+# vCPU, so nginx now sharing it with the worker again is the real cost of
+# self-fronting — accepted in exchange for not depending on an external edge.
+#
+# Host networking on purpose: keeps the host's sysctl network tuning and the
+# /etc/hosts LINE-IP pin (deploy/pin-legy-fast-ips.sh) working unchanged, with
+# no docker-proxy / NAT / conntrack on the LINE connections.
+
+services:
+  backend:
+    image: linebot/vps3:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      args:
+        DENO_VERSION: "2.9.7"
+        APP_UID: "${LFR_UID:-1000}"
+        APP_GID: "${LFR_GID:-1000}"
+        # Stamped into .release.json: GIT_COMMIT=$(git rev-parse --short=12 HEAD)
+        GIT_COMMIT: "${GIT_COMMIT:-unknown}"
+        BUILT_AT_MS: "${BUILT_AT_MS:-0}"
+    container_name: linebot-vps3
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    # SIGTERM lets the CLI stop the receiver and finish one in-flight reply.
+    stop_grace_period: 30s
+    user: "${LFR_UID:-1000}:${LFR_GID:-1000}"
+    env_file:
+      - path: /opt/line-first-response/.env
+        required: false
+    environment:
+      # No --host override below means loopback (DEFAULT_HOSTNAME in
+      # observability/server.ts) — correct now that `front` reaches it over
+      # 127.0.0.1 on the same host.
+      HEALTH_URL: "http://127.0.0.1:${VPS3_PORT:-8791}/api/health"
+    # One console owns the human-account registry and routes every signed-in
+    # person to their own BotHost; --multi-bot is required (same as the unit).
+    command:
+      - --config
+      - config/bots/bot-1.json
+      - --sessions-dir
+      - .sessions
+      - --users-file
+      - .control/users.json
+      - --multi-bot
+      - --port
+      - "${VPS3_PORT:-8791}"
+    volumes:
+      # The session files under .sessions ARE the LINE credentials: host
+      # directories, used in place, never copied into an image.
+      - ${LFR_ROOT:-/opt/line-first-response}/config:/app/config
+      - ${LFR_ROOT:-/opt/line-first-response}/.sessions:/app/.sessions
+      - ${LFR_ROOT:-/opt/line-first-response}/.control:/app/.control
+      # Host /etc/hosts carries the fast-LINE-IP pin; the pin script rewrites it
+      # in place (same inode) so this single-file mount stays current.
+      - /etc/hosts:/etc/hosts:ro
+      # Named volume, NOT tmpfs: Docker seeds a fresh named volume from the
+      # image directory it overlays (copy-up on first create), so the
+      # build-time `deno cache --frozen` payload survives into the running
+      # container. tmpfs starts empty and would silently defeat --cached-only
+      # above (Dockerfile ENTRYPOINT) on every restart, forcing a re-download.
+      - deno-cache:/deno-dir
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  front:
+    image: linebot/vps3-front:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: front/Dockerfile
+    container_name: linebot-vps3-front
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    depends_on:
+      - backend
+    volumes:
+      # Self-signed cert generated once by the runbook (openssl req), never
+      # baked into the image.
+      - /etc/ssl/lfr:/etc/ssl/lfr:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:rw,nosuid,size=64m
+      - /var/run:rw,nosuid,size=16m
+    cap_drop:
+      - ALL
+    # nginx's own entrypoint/master needs these even running as root inside
+    # the container: CHOWN to own its tmpfs temp dirs, SETUID/SETGID to drop
+    # worker processes to the unprivileged nginx user, NET_BIND_SERVICE for
+    # ports <1024. cap_drop: ALL strips even root's implicit capabilities.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  # Seeded from the image's /deno-dir on first create (see the mount above).
+  deno-cache:

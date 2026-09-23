@@ -1,0 +1,23 @@
+# Build context = the worker source + vendored LINEJS only.
+*
+!deno.json
+!deno.lock
+!packages/
+!packages/**
+!vendor/linejs/
+!vendor/linejs/**
+!apps/worker/src/
+!apps/worker/src/**
+
+# Never in an image: local deps (re-resolved from deno.lock), tests, secrets.
+# vendor/linejs/docs stays: vendor/linejs/deno.json lists ./docs as a workspace member.
+**/node_modules
+vendor/linejs/.git
+**/*.test.ts
+**/.env
+**/.env.*
+.sessions
+.control
+**/*.pem
+**/*.key
+**/.git

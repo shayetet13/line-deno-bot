@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodically re-measure and pin the fastest LINE edge IPs
+
+[Timer]
+# First run shortly after boot, then every 6h. LINE's edge pool does not
+# churn fast enough to need tighter polling, and lane recycling (15 min
+# maxAgeMs) is what actually picks up a new pin — this timer only needs to
+# catch slow drift, not react in real time.
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=legy-fast-ip-pin.service
+
+[Install]
+WantedBy=timers.target

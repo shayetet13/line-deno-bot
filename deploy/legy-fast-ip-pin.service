@@ -1,0 +1,21 @@
+[Unit]
+Description=Pin legy/gf to the fastest measured LINE edge IPs
+Documentation=file:///opt/line-first-response/current/docs/runbook.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/line-first-response/current
+ExecStart=/opt/line-first-response/current/deploy/pin-legy-fast-ips.sh --apply
+
+# Never restart lfr-worker here. Reply lanes are deliberately never
+# force-recycled by anything but GOAWAY/error/age (see lane-pool.ts
+# #recycleOldest) — a fresh pin re-resolves on its own within maxAgeMs
+# (15 minutes) via the existing background warmer, with zero dropped
+# in-flight replies. Restarting the service on every pin run would trade a
+# theoretical IP improvement for a guaranteed connection drop.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=legy-fast-ip-pin
