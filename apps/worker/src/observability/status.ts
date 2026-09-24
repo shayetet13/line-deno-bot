@@ -49,6 +49,10 @@ export interface LaneView {
   score?: LaneStat['score'];
   /** True for the lane replies are pinned to right now. */
   currentSend?: boolean;
+  /** Who chose that pin: the background scout or the reply path. */
+  pinnedBy?: LaneStat['pinnedBy'];
+  /** Tail-aware estimate over the read-only probes the scout ranks by. */
+  preflightPredictedMs?: number | undefined;
   /** True for a reply lane held back as a spare. */
   spare?: boolean;
   /** Whether ordinary routing currently considers the lane. */
@@ -98,8 +102,12 @@ export function classifyLanes(
     }
   }
 
+  // With a scout pin the router takes that lane, so it alone is HOT among
+  // reply lanes even when another shows a lower send median.
+  const scoutPinned = stats.some((stat) => stat.currentSend === true && stat.pinnedBy === 'scout');
+
   return withFreshness.map(({ stat, sampleAgeMs, fresh }) => {
-    const roleBest = bestByRole.get(stat.role);
+    const roleBest = scoutPinned && stat.role === 'send' ? undefined : bestByRole.get(stat.role);
     return {
       laneId: stat.id,
       workerId: options.workerId,
@@ -123,6 +131,8 @@ export function classifyLanes(
       role: stat.role,
       score: stat.score,
       currentSend: stat.currentSend,
+      pinnedBy: stat.pinnedBy,
+      preflightPredictedMs: stat.preflightPredictedMs,
       spare: stat.spare,
       routeEligible: stat.routeEligible,
     };
@@ -134,6 +144,9 @@ function badgeFor(stat: LaneStat, fresh: boolean, best: number | undefined): Lan
   if (stat.state !== 'ready' || stat.available === false || stat.routeEligible === false) {
     return 'wait';
   }
+  // A scout pin is the lane the next reply takes, whether or not a real reply
+  // has run on it yet — the router, not a send median, decides that.
+  if (stat.currentSend === true && stat.pinnedBy === 'scout') return 'hot';
   if (!fresh || stat.medianRttMs === undefined) return 'wait';
   return best !== undefined && (stat.predictedRttMs ?? stat.medianRttMs) === best
     ? 'hot'

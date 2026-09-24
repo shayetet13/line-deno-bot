@@ -21,6 +21,9 @@ export interface LaneRoleHints {
    * chat message. It is startup work only, before inbound handling starts.
    */
   preflightSendLanes(lanes: number, squareChatMid: string): Promise<SendPreflightResult[]>;
+  /** One read-only probe forced onto exactly `laneId`. Rejects when the RPC
+   * fails; the owned pool has already recorded the lane's RTT by then. */
+  probeSendLane(laneId: number, squareChatMid: string): Promise<void>;
 }
 
 /**
@@ -46,19 +49,31 @@ export function installLaneRoleHints(client: Client): LaneRoleHints {
     return originalRequest(...args);
   }) as typeof requestClient.request;
 
+  // `getSquareChatStatus` reaches `request()` synchronously, so the forced
+  // lane is attached before this returns and the marker can be cleared at
+  // once — a later unrelated call can never inherit it, and probes from the
+  // background scout may overlap an in-flight one safely.
+  const probeSendLane = async (laneId: number, squareChatMid: string): Promise<void> => {
+    preflightLaneId = laneId;
+    let pending: Promise<unknown>;
+    try {
+      pending = client.base.square.getSquareChatStatus({ request: { squareChatMid } });
+    } finally {
+      preflightLaneId = undefined;
+    }
+    await pending;
+  };
+
   return {
+    probeSendLane,
     async preflightSendLanes(
       lanes: number,
       squareChatMid: string,
     ): Promise<SendPreflightResult[]> {
       const results: SendPreflightResult[] = [];
       for (let laneId = 0; laneId < lanes; laneId += 1) {
-        if (preflightLaneId !== undefined) {
-          throw new Error('send preflight is already in progress');
-        }
-        preflightLaneId = laneId;
         try {
-          await client.base.square.getSquareChatStatus({ request: { squareChatMid } });
+          await probeSendLane(laneId, squareChatMid);
           results.push({ laneId, ok: true });
         } catch (error: unknown) {
           results.push({
@@ -66,8 +81,6 @@ export function installLaneRoleHints(client: Client): LaneRoleHints {
             ok: false,
             reason: error instanceof Error ? error.message : String(error),
           });
-        } finally {
-          preflightLaneId = undefined;
         }
       }
       return results;

@@ -274,3 +274,28 @@ describe('AlertEvaluator — pending', () => {
     expect(e.pending.map((p) => p.kind)).toContain('failure-rate');
   });
 });
+
+describe('AlertEvaluator — CPU-starved host', () => {
+  const lag = (p99: number, window = 100) => ({
+    shard: 'shard-1',
+    loopLagMs: { count: window, window, min: 0, p50: 1, p95: p99, p99, max: p99, mean: 1 },
+  });
+
+  test('sustained event-loop lag fires, and says what fixes it', () => {
+    const e = new AlertEvaluator();
+    e.evaluate(snap({ host: lag(25) }));
+    const alerts = e.evaluate(snap({ generatedAtMs: T0 + 61_000, host: lag(25) }));
+    expect(kinds(alerts)).toEqual(['host-cpu-starved']);
+    expect(alerts[0]?.severity).toBe('warning');
+    expect(alerts[0]?.message).toContain('BOT_SHARDS');
+  });
+
+  test('a healthy loop, or too few samples, stays quiet', () => {
+    const e = new AlertEvaluator();
+    e.evaluate(snap({ host: lag(3) }));
+    expect(e.evaluate(snap({ generatedAtMs: T0 + 61_000, host: lag(3) }))).toEqual([]);
+    const f = new AlertEvaluator();
+    f.evaluate(snap({ host: lag(80, 5) }));
+    expect(f.evaluate(snap({ generatedAtMs: T0 + 61_000, host: lag(80, 5) }))).toEqual([]);
+  });
+});

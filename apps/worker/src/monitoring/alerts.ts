@@ -23,6 +23,7 @@ export const ALERT_KINDS = [
   'line-trigger-reply-budget',
   'failure-rate',
   'no-lane-available',
+  'host-cpu-starved',
 ] as const;
 export type AlertKind = (typeof ALERT_KINDS)[number];
 
@@ -57,6 +58,9 @@ export interface AlertThresholds {
   /** Below this many samples, latency and rate rules stay quiet — a 100% failure
    * rate over two sends is noise. */
   minSamples: number;
+  /** p99 event-loop lag above this means the bot's thread is short of CPU:
+   * every reply on it waits in a queue before it can even be sent. */
+  loopLagP99Ms: number;
 }
 
 export const DEFAULT_THRESHOLDS: AlertThresholds = {
@@ -68,6 +72,7 @@ export const DEFAULT_THRESHOLDS: AlertThresholds = {
   failureRate: 0.05,
   minDurationMs: 60_000,
   minSamples: 20,
+  loopLagP99Ms: 10,
 };
 
 export interface AlertBaseline {
@@ -245,6 +250,22 @@ export class AlertEvaluator {
       1,
       (forMs) => `all ${String(lanes.length)} lanes unusable for ${fmtMs(forMs)}`,
     );
+
+    // 7. CPU starvation on this bot's thread. Only more cores or fewer bots per
+    //    shard fix it, so it is observation-only for the recovery ladder.
+    const loopLag = snapshot.host?.loopLagMs;
+    if (loopLag !== undefined) {
+      push(
+        'host-cpu-starved',
+        loopLag.window >= t.minSamples && loopLag.p99 > t.loopLagP99Ms,
+        loopLag.p99 > t.loopLagP99Ms * 5 ? 'critical' : 'warning',
+        round(loopLag.p99),
+        t.loopLagP99Ms,
+        (forMs) =>
+          `event loop p99 ${loopLag.p99.toFixed(1)}ms late for ${fmtMs(forMs)} — ` +
+          'the host is short of CPU for the bots it runs; add cores or raise BOT_SHARDS',
+      );
+    }
 
     return alerts;
   }

@@ -4,6 +4,82 @@
 
 ---
 
+## ADR-0011 — Bot หลายตัวใน `--multi-bot` รันบน bot shard (Worker thread) ไม่ใช่ thread เดียวกับ console
+
+**วันที่:** 2026-09-24
+
+**Context:** production ใช้ `--multi-bot` ซึ่งเดิมรัน bot ทุกตัวบน JavaScript thread เดียว และ vps3 มี 1 vCPU
+เมื่อเพิ่มเป็น 20 bot ตัวเลขกระโดด 50–400ms. วัดด้วย simulator (LanePool + LINEJS request path +
+SquarePollAdapter ของจริง, mock LINE server แบบ TLS/HTTP2 หน่วง 10ms/19ms, ปักไว้ 1 core):
+
+| topology (poll 1 ห้อง/bot, `pollIntervalMs: 0`) | CPU           | คำตอบช้าเพิ่ม p95    | ช้าสุด       |
+| ---------------------------------------------- | ------------- | ----------------- | ---------- |
+| 1 bot                                          | 7% ของ 1 core | +3.5ms            | +7ms       |
+| 20 bot, thread เดียว, 1 core                    | 46%           | +9.6ms            | +15ms      |
+| 20 bot, process ละตัว, **1 core**               | 100% (อิ่มตัว)   | +40ms (แย่สุด +106) | **+180ms** |
+| 20 bot, process ละตัว, 2 core                   | 139%          | +9.7ms            | +19ms      |
+| 20 bot, 1 shard thread, 2 core                 | 51%           | +3.7ms            | +4.5ms     |
+
+ข้อสรุป: (1) อาการกระโดดคือ CPU ไม่พอ ไม่ใช่ LINE (2) CPU ขึ้นกับ **จำนวน poll ต่อวินาที** ไม่ใช่โค้ดเรา —
+`LanePool` กิน ~5µs/request, fetch ของ Deno เองเป็นส่วนใหญ่ (3) แยก process ละ bot เปลืองกว่ารวม ~3
+เท่าเพราะแต่ละ process ตื่นแยกกัน (4) thread เดียวใช้ได้ core เดียวไม่ว่าเครื่องมีกี่ core
+
+**Decision:**
+
+- `--multi-bot` รัน bot ใน `BOT_SHARDS` Worker thread (ค่าเริ่ม: จำนวน core − 1, อย่างน้อย 1, สูงสุด 8;
+  `BOT_SHARDS=0` = แบบเดิม). bot ใหม่ไป shard ที่มี bot น้อยสุด และอยู่ shard เดิมตลอดอายุ process
+- ใน shard, bot คือ `BotHost` ตัวเดิมและ route ของ console คือ handler ตัวเดิม (`shard-worker.ts` เป็นแค่
+  bridge) console thread ยืนยันตัวตน ถือทะเบียนบัญชี (writer เดียวของ `.control/users.json`) แล้ว forward
+  request ของ คนนั้นไป shard ของ bot เขาเท่านั้น — ownership ตัดสินก่อน forward เหมือนเดิม
+- shard ตาย (uncaught error) → เริ่ม thread ใหม่และ start bot ของ shard นั้นใหม่; shard อื่นไม่รู้ตัว
+- Node sidecar ของ `/PUSH` ใช้ร่วมกันหนึ่งตัวต่อ thread (เดิมหนึ่งตัวต่อ bot = 20 process) โดยแต่ละ bot ยังมี
+  HTTP/2 session และ health ของตัวเอง
+- ทุก thread วัด event-loop lag (`metrics/loop-lag.ts`) ส่งออกใน `/api/status → host` และ alert
+  `host-cpu-starved` (p99 > 10ms นาน 60s) ซึ่ง **observation-only** — reconnect ใช้ CPU เพิ่ม ไม่ได้ลด
+
+**Consequences:**
+
+- (+) bot หนึ่งตัวที่ decode หนักไม่หน่วง bot ใน shard อื่น, ใช้ได้ทุก core, UX login หน้าเดียวเหมือนเดิม
+- (+) แยกได้ทันทีว่ากระโดดเพราะเครื่อง (loop lag ขึ้นพร้อม send) หรือเพราะ LINE (send ขึ้น loop lag นิ่ง)
+- (−) บนเครื่อง 1 vCPU shard ช่วยได้น้อย — ต้องเพิ่ม core; คำแนะนำขนาดเครื่องอยู่ใน runbook §10
+- (−) sidecar ที่ใช้ร่วมกันตายทีเดียว PUSH ของทุก bot ใน thread นั้นหลุดพร้อมกัน (reconnect เองอัตโนมัติ และ
+  dedicated poll ยังรับห้องที่เฝ้าอยู่)
+
+---
+
+## ADR-0010 — Reply lane เลือกด้วย scout ที่วัดต่อเนื่อง: ยึดเส้นเร็ว สลับเมื่อมีเส้นเร็วกว่าจริง
+
+**วันที่:** 2026-09-24
+
+**Context:** router เดิมเรียนรู้จาก reply จริงเท่านั้น ซึ่งมีไม่กี่ครั้งต่อนาที และ preflight ทำครั้งเดียวตอน start —
+ลำดับความเร็วจึงเก่าลงเรื่อย ๆ และ pin ยังอยู่บน lane ที่เคยเร็วตอน start แม้อีก lane จะเร็วกว่าแล้ว
+(`sendReservedLanes: 2, sendSpareLanes: 1` = มี primary lane เดียว เลือกอะไรไม่ได้เลย). ความต่างต่อ
+connection เป็นของจริง: sendMessage เส้นดี 20.3–21.0ms เส้นอื่น 23–25ms บน IP เดียวกัน เพราะ edge ของ LINE
+map แต่ละ connection ไป backend ต่างกัน
+
+**Decision:** `transport/reply-scout.ts`
+
+1. **วัด** — ยิง `getSquareChatStatus` (read-only, ผ่าน Square service เดียวกับ sendMessage) บังคับลง reply
+   lane ทีละเส้น เส้นที่ข้อมูลเก่าสุดก่อน ทุก `replyProbeIntervalMs` (ค่าเริ่ม 1000). ไม่ยิงขณะมี reply อยู่บนสาย
+   หรือภายใน 300ms หลัง reply เริ่ม. probe ที่ค้างบน lane ไม่ทำให้ lane นั้นนับว่า "busy" — reply วิ่งคู่กันบน HTTP/2
+   ได้โดยไม่ต่อคิว จึงไม่ถูกดันไป lane ที่ช้ากว่า
+2. **ยึดแล้วค่อยสลับ** — pin ย้ายเฉพาะเมื่อ lane อื่นเร็วกว่า ≥0.5ms (predicted = p50 + 35% ของ p95−p50) ติดกัน 2
+   รอบ; pin แรกเลือกเมื่อวัดครบทุก lane แล้ว (startup ยิง preflight 3 รอบให้ครบก่อน ARMED). scout ข้าม veto
+   ของ router ไม่ได้ (tail เกิน 27ms, bypass หลัง breach)
+3. **หาเส้นใหม่** — lane ที่ไม่ได้ pin และช้ากว่าเส้นดีสุด ≥2ms ถูกเปิด connection ใหม่ (สูงสุด 1 ครั้ง/30s) ระหว่าง
+   HEAD + probe 3 ครั้ง lane ถูกซ่อนจาก reply แล้วค่อยปล่อย — reply จริงไม่เคยจ่าย TCP/TLS handshake
+
+**Consequences:**
+
+- (+) ข้อ "เจอเส้นเร็วให้ค้างไว้ จนกว่ามีเส้นที่เร็วกว่าค่อยสลับ" เป็นพฤติกรรมที่มีเทสต์รองรับ
+- (+) ทุก reply lane อุ่นอยู่ตลอด เพราะ probe คือ request จริง — สลับ lane ไม่มี cold path
+- (+) pin ใหม่ของ `pin-legy-fast-ips.sh` ถูกรับเข้าเองผ่าน re-roll โดยไม่ต้อง restart
+- (−) +1 request/วินาที/bot (เทียบกับ poll ~84/วินาที/ห้อง = เล็กน้อย)
+- (−) ยังไม่ได้พิสูจน์ด้วย live A/B ว่า latency ของ getSquareChatStatus ต่อ lane ทำนาย sendMessage ต่อ lane
+  ได้แม่น — ถ้าไม่แม่น ปิดได้ด้วย `replyProbeIntervalMs: 0` (กลับเป็น routing แบบเดิม 100%)
+
+---
+
 ## ADR-0009 — Recovery ต้องไต่บันได ไม่ restart จาก alert เดียว
 
 **วันที่:** 2026-09-10

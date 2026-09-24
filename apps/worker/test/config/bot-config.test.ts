@@ -132,6 +132,18 @@ describe('parseBotConfig', () => {
     expect(errorsOf(minimal({ squarePollRaceWidth: 50 })).join()).toContain('squarePollRaceWidth');
   });
 
+  test('replyProbeIntervalMs defaults to 1s, allows 0 (off), and refuses probe floods', () => {
+    expect(parse({}).replyProbeIntervalMs).toBe(1_000);
+    expect(parse({ replyProbeIntervalMs: 0 }).replyProbeIntervalMs).toBe(0);
+    expect(parse({ replyProbeIntervalMs: 500 }).replyProbeIntervalMs).toBe(500);
+    expect(errorsOf(minimal({ replyProbeIntervalMs: 50 })).join()).toContain(
+      'replyProbeIntervalMs',
+    );
+    expect(errorsOf(minimal({ replyProbeIntervalMs: -1 })).join()).toContain(
+      'replyProbeIntervalMs',
+    );
+  });
+
   test('squarePollStagger defaults to 1, is capped, and excludes squarePollRaceWidth', () => {
     expect(parse({}).squarePollStagger).toBe(1);
     expect(parse({ squarePollStagger: 3 }).squarePollStagger).toBe(3);

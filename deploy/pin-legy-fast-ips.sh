@@ -4,8 +4,17 @@
 # selected Talk routes use gf /enc instead. Both names are pinned so push,
 # poll, and send cannot resolve onto a known-slow edge.
 # Resolution is obtained through DoH so an existing /etc/hosts pin cannot hide
-# pool changes. Every candidate is measured with a real HTTPS request (TLS and
+# pool changes. Every candidate is measured with real HTTPS requests (TLS and
 # SNI intact), not ICMP. Applying is transactional and verification rolls back.
+#
+# Ranking uses the WARM request time: several requests over ONE HTTP/2
+# connection per address, first one discarded. A reply always travels over an
+# already-open lane, so the handshake is not what it pays — the per-request
+# time on an open connection is. The handshake is still printed for reference.
+#
+# The OS resolver prefers IPv6 over IPv4 regardless of file order, so when the
+# fastest address is IPv4 only IPv4 addresses are pinned (and vice versa for
+# IPv6 first); the order getaddrinfo will actually return is then verified.
 
 set -euo pipefail
 
@@ -17,6 +26,8 @@ BACKUP_DIR="${LEGY_PIN_BACKUP_DIR:-/var/backups/legy-hosts-pin}"
 BEGIN_MARKER="# BEGIN legy-fast-ip-pin (managed by line-first-response)"
 END_MARKER="# END legy-fast-ip-pin"
 SAMPLES="${LEGY_PIN_SAMPLES:-8}"
+# Requests per connection; the first carries the handshake and is not ranked.
+WARM_REQUESTS="${LEGY_PIN_WARM_REQUESTS:-6}"
 TIMEOUT="${LEGY_PIN_TIMEOUT:-5}"
 SLOW_MULTIPLIER="${LEGY_PIN_SLOW_MULTIPLIER:-1.8}"
 ABSOLUTE_CEILING_MS="${LEGY_PIN_ABSOLUTE_CEILING_MS:-25}"
@@ -68,27 +79,49 @@ if [[ "${#pool[@]}" -eq 0 ]]; then
 fi
 echo "resolved ${#pool[@]} addresses"
 
+median_of() {
+  sort -n | awk '{v[NR]=$1} END {if (NR == 0) exit 1; print NR%2 ? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2}'
+}
+
+# One curl = one TCP/TLS/H2 connection carrying WARM_REQUESTS requests. Prints
+# "handshake_ms warm_ms warm_ms ..." (warm = every request after the first).
+probe_connection() {
+  local ip="$1" targets=() i
+  # Each URL needs its own `-o`, or every body after the first lands on stdout.
+  for ((i = 0; i < WARM_REQUESTS; i++)); do
+    targets+=(-o /dev/null "https://${TARGET_HOST}${PROBE_PATH}")
+  done
+  # HTTP status is irrelevant: unauthenticated /SQ1 returns a 4xx, which still
+  # crosses the exact TCP/TLS/H2 route LINE uses for Square RPCs.
+  curl --http2 --resolve "${TARGET_HOST}:443:${ip}" -sS --max-time "$TIMEOUT" \
+    -w '%{time_appconnect} %{time_total} %{time_pretransfer}\n' \
+    "${targets[@]}" 2>/dev/null |
+    awk 'NR == 1 { printf "%.3f", $1 * 1000; next }
+         { printf " %.3f", ($2 - $3) * 1000 } END { print "" }' || true
+}
+
 declare -A median_by_ip
 all_medians=()
 for ip in "${pool[@]}"; do
-  times=()
+  warm=()
+  handshakes=()
   for ((sample = 0; sample < SAMPLES; sample++)); do
-    # HTTP status is irrelevant here: unauthenticated /SQ1 returns a 4xx. It
-    # still proves the exact TCP/TLS/H2 route and must remain measurable.
-    seconds="$(curl --resolve "${TARGET_HOST}:443:${ip}" -sS -o /dev/null \
-      -w '%{time_total}' --max-time "$TIMEOUT" "https://${TARGET_HOST}${PROBE_PATH}" 2>/dev/null || true)"
-    [[ -n "$seconds" ]] && times+=("$(awk -v t="$seconds" 'BEGIN { printf "%.3f", t * 1000 }')")
+    read -r -a fields <<<"$(probe_connection "$ip")"
+    [[ "${#fields[@]}" -ge 2 ]] || continue
+    handshakes+=("${fields[0]}")
+    warm+=("${fields[@]:1}")
   done
-  if [[ "${#times[@]}" -eq 0 ]]; then
+  if [[ "${#warm[@]}" -eq 0 ]]; then
     median_by_ip["$ip"]="999999"
     printf '  %-28s unreachable\n' "$ip"
     continue
   fi
-  median="$(printf '%s\n' "${times[@]}" | sort -n | awk \
-    '{v[NR]=$1} END {print NR%2 ? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2}')"
+  median="$(printf '%s\n' "${warm[@]}" | median_of)"
+  handshake="$(printf '%s\n' "${handshakes[@]}" | median_of)"
   median_by_ip["$ip"]="$median"
   all_medians+=("$median")
-  printf '  %-28s median=%sms n=%d\n' "$ip" "$median" "${#times[@]}"
+  printf '  %-28s warm_median=%sms (n=%d)  tls_handshake=%sms\n' \
+    "$ip" "$median" "${#warm[@]}" "$handshake"
 done
 
 [[ "${#all_medians[@]}" -gt 0 ]] || {
@@ -123,6 +156,16 @@ if [[ "${#fast[@]}" -gt 0 ]]; then
   mapfile -t fast < <(
     for ip in "${fast[@]}"; do printf '%s\t%s\n' "${median_by_ip[$ip]}" "$ip"; done |
       sort -n | cut -f2-
+  )
+  # getaddrinfo puts IPv6 before IPv4 whatever the file order says. Keep the
+  # family of the fastest address so the first address the worker connects to
+  # really is the fastest one; the other family is only a fallback in DNS.
+  best_family=4
+  [[ "${fast[0]}" == *:* ]] && best_family=6
+  mapfile -t fast < <(
+    for ip in "${fast[@]}"; do
+      if [[ "$best_family" == 6 ]] || [[ "$ip" != *:* ]]; then printf '%s\n' "$ip"; fi
+    done
   )
 fi
 
@@ -170,9 +213,12 @@ else
   cp -- "$HOSTS_FILE" "$tmp"
   printf '\n%s\n' "$new_block" >>"$tmp"
 fi
-chmod --reference="$HOSTS_FILE" "$tmp"
-chown --reference="$HOSTS_FILE" "$tmp"
-mv -- "$tmp" "$HOSTS_FILE"
+# Rewrite in place, keeping the inode: a Docker container that bind-mounts
+# /etc/hosts holds the original inode, so a rename would leave it reading the
+# old pin forever. The content is a few hundred bytes; a reader racing this
+# write can only ever fall back to DNS for one lookup.
+cat -- "$tmp" >"$HOSTS_FILE"
+rm -f -- "$tmp"
 trap - EXIT
 
 code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$TIMEOUT" \
@@ -184,4 +230,13 @@ if [[ -z "$code" || "$code" == "000" ]]; then
 fi
 
 echo "updated $HOSTS_FILE; HTTPS verification returned HTTP $code"
-echo "restart the worker so every HTTP/2 lane resolves from the new fast set"
+if command -v getent >/dev/null; then
+  first="$(getent ahosts "$TARGET_HOST" | awk 'NR == 1 {print $1}')"
+  if [[ "$first" == "${fast[0]}" ]]; then
+    echo "resolver order verified: new connections go to ${first} first"
+  else
+    echo "warning: the resolver returns ${first:-nothing} first, not ${fast[0]} — check /etc/gai.conf" >&2
+  fi
+fi
+echo "no restart needed: reply lanes pick the new address up as the scout re-rolls them,"
+echo "and every lane does on its next reconnect; restart the worker to move all at once"

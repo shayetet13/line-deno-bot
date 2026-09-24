@@ -3,6 +3,17 @@ import { ConfigError } from '../errors/base.ts';
 import type { Logger } from '../logging/logger.ts';
 import type { BotHost } from './bot-host.ts';
 
+/** What the registry needs from a bot, wherever it runs: in this thread
+ * (`BotHost`) or in a bot shard (`ShardedBotHost`). */
+export interface ManagedBot {
+  readonly botId: string;
+  readonly configPath: string;
+  /** Settles once the start or restart in flight has finished. */
+  readonly ready: Promise<void>;
+  start(): Promise<void>;
+  close(): Promise<void>;
+}
+
 /**
  * Who owns which bot, and the live `BotHost` behind each.
  *
@@ -18,13 +29,13 @@ import type { BotHost } from './bot-host.ts';
  * session, rules and rooms instead of silently starting over.
  */
 
-export interface BotRegistryOptions {
+export interface BotRegistryOptions<H extends ManagedBot = BotHost> {
   users: UsersStore;
   logger: Logger;
-  primary: BotHost;
+  primary: H;
   /** Builds the host for another bot id. The config file for `botId` exists
    * (or is about to) at `configPathFor(botId)`. */
-  createHost: (botId: string, configPath: string) => BotHost;
+  createHost: (botId: string, configPath: string) => H;
   /** Directory holding every bot's config JSON (the primary's own directory). */
   botsDir: string;
   /** Raw JSON of the primary's config, used as the tuning template (lanes,
@@ -66,15 +77,15 @@ const PER_BOT_KEYS = ['dedicatedRooms', 'selectedRooms', 'allowedSenders', 'rule
 
 const botIdForUser = (userId: string): string => `u-${userId.replaceAll('-', '').slice(0, 12)}`;
 
-export class BotRegistry {
-  readonly #o: BotRegistryOptions;
+export class BotRegistry<H extends ManagedBot = BotHost> {
+  readonly #o: BotRegistryOptions<H>;
   readonly #ownedStartConcurrency: number;
-  readonly #hosts = new Map<string, BotHost>();
+  readonly #hosts = new Map<string, H>();
   /** Serialises assignment: two first requests must not both claim the primary
    * bot, or both mint a bot for the same person. */
   #assigning: Promise<unknown> = Promise.resolve();
 
-  constructor(options: BotRegistryOptions) {
+  constructor(options: BotRegistryOptions<H>) {
     this.#o = options;
     const concurrency = options.ownedStartConcurrency ?? DEFAULT_OWNED_START_CONCURRENCY;
     if (!Number.isInteger(concurrency) || concurrency < 1) {
@@ -84,13 +95,13 @@ export class BotRegistry {
     this.#hosts.set(options.primary.botId, options.primary);
   }
 
-  get primary(): BotHost {
+  get primary(): H {
     return this.#o.primary;
   }
 
   /** The bot this user owns, assigned and started on first use. Waits for any
    * start or restart in flight, so the caller never sees a half-built one. */
-  async hostFor(user: UserRecord): Promise<BotHost> {
+  async hostFor(user: UserRecord): Promise<H> {
     const host = await this.#serialised(() => this.#resolve(user));
     await host.ready;
     return host;
@@ -142,7 +153,7 @@ export class BotRegistry {
     return run;
   }
 
-  async #resolve(user: UserRecord): Promise<BotHost> {
+  async #resolve(user: UserRecord): Promise<H> {
     // Re-read: the record the caller holds may predate an assignment made
     // while this call waited its turn.
     const current = await this.#o.users.findById(user.userId) ?? user;

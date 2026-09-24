@@ -30,7 +30,7 @@ export const RECOVERY_RUNGS = [
 export type RecoveryRung = (typeof RECOVERY_RUNGS)[number];
 
 /** The rung an alert kind starts at. Escalation past it is earned, not assumed. */
-type ActionableAlertKind = Exclude<AlertKind, 'line-trigger-reply-budget'>;
+type ActionableAlertKind = Exclude<AlertKind, 'line-trigger-reply-budget' | 'host-cpu-starved'>;
 
 const ENTRY_RUNG: Readonly<Record<ActionableAlertKind, RecoveryRung>> = {
   'first-response-regression': 'avoid-lane',
@@ -42,8 +42,9 @@ const ENTRY_RUNG: Readonly<Record<ActionableAlertKind, RecoveryRung>> = {
 
 /** A trigger-to-reply result combines inbound and outbound paths. It is the
  * outcome budget operators need to see, but by itself cannot prove a lane is
- * at fault. Alert it; do not tear down a healthy connection automatically. */
-const OBSERVATION_ONLY = new Set<AlertKind>(['line-trigger-reply-budget']);
+ * at fault. Alert it; do not tear down a healthy connection automatically.
+ * A CPU-starved host is the same: reconnecting spends more CPU, not less. */
+const OBSERVATION_ONLY = new Set<AlertKind>(['line-trigger-reply-budget', 'host-cpu-starved']);
 
 export interface RecoveryAction {
   rung: RecoveryRung;

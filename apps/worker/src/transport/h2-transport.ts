@@ -63,16 +63,30 @@ export interface H2PushFetch extends WarmFetch {
   readonly pushHealth: PushHealth;
 }
 
+/** One Node sidecar per thread, shared by every bot on it. Twenty bots used to
+ * mean twenty Node processes, each idling on one stream; the sidecar already
+ * multiplexes by stream id, so bots now share the process while each keeps its
+ * own HTTP/2 session (keyed by its own session id) and its own health. */
+let sharedSidecar: NodeH2Sidecar | undefined;
+/** Negative, so a PUSH session key can never collide with a reply lane id. */
+let nextPushSessionId = -1;
+
 export function createH2PushFetch(options: { origin: string }): H2PushFetch {
-  const sidecar = new NodeH2Sidecar();
+  const sidecar = sharedSidecar ??= new NodeH2Sidecar();
   sidecar.retain();
-  const laneId = -1;
+  const laneId = nextPushSessionId--;
+  let closed = false;
   const push = ((info: Request | URL | string, init?: RequestInit) => {
     const request = info instanceof Request ? info : new Request(info, init);
     return sidecar.fetchPush(laneId, request);
   }) as H2PushFetch;
-  Object.defineProperty(push, 'pushHealth', { get: () => sidecar.pushHealth });
-  push.close = (): void => sidecar.release();
+  Object.defineProperty(push, 'pushHealth', { get: () => sidecar.pushHealthFor(laneId) });
+  push.close = (): void => {
+    if (closed) return;
+    closed = true;
+    sidecar.cancelSession(laneId);
+    if (sidecar.release() && sharedSidecar === sidecar) sharedSidecar = undefined;
+  };
   // Keep the origin explicit at construction so callers cannot accidentally
   // couple this long-lived path to an arbitrary reply lane.
   void options.origin;
@@ -133,39 +147,57 @@ interface SidecarPushError {
 class NodeH2Sidecar {
   readonly #encoder = new TextEncoder();
   readonly #pushes = new Map<number, {
+    laneId: number;
     resolve: (response: SidecarPushHeaders) => void;
     reject: (error: Error) => void;
     controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   }>();
+  /** Per bot: each bot's PUSH is its own session and its own health. */
+  readonly #health = new Map<number, PushHealth>();
   #process: Deno.ChildProcess | undefined;
   #writer: WritableStreamDefaultWriter<Uint8Array> | undefined;
   #starting: Promise<void> | undefined;
   #nextId = 1;
   #users = 0;
-  #pushHealth: PushHealth = { ready: false, reason: 'PUSH has not opened yet' };
 
-  get pushHealth(): PushHealth {
-    return { ...this.#pushHealth };
+  pushHealthFor(laneId: number): PushHealth {
+    return { ...(this.#health.get(laneId) ?? { ready: false, reason: 'PUSH has not opened yet' }) };
   }
 
   retain(): void {
     this.#users += 1;
   }
 
-  release(): void {
+  /** Returns true when this was the last user and the process was stopped. */
+  release(): boolean {
     this.#users = Math.max(0, this.#users - 1);
-    if (this.#users > 0) return;
+    if (this.#users > 0) return false;
     this.#writer?.close().catch(() => {});
     this.#process?.kill('SIGTERM');
     this.#failAll(new Error('HTTP/2 sidecar closed'));
     this.#process = undefined;
     this.#writer = undefined;
     this.#starting = undefined;
+    return true;
+  }
+
+  /** Ends one bot's PUSH streams without touching anyone else's. */
+  cancelSession(laneId: number): void {
+    for (const [id, pending] of this.#pushes) {
+      if (pending.laneId !== laneId) continue;
+      void this.#write({ type: 'cancel', id }).catch(() => {});
+      this.#finishPushError(id, new Error('HTTP/2 push closed'));
+    }
+    this.#health.delete(laneId);
+  }
+
+  #setHealth(laneId: number, health: PushHealth): void {
+    this.#health.set(laneId, health);
   }
 
   async fetchPush(laneId: number, request: Request): Promise<Response> {
     await this.#ensureStarted();
-    this.#pushHealth = { ready: false, reason: 'waiting for LINE PUSH response' };
+    this.#setHealth(laneId, { ready: false, reason: 'waiting for LINE PUSH response' });
     const id = this.#nextId++;
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
     const responseBody = new ReadableStream<Uint8Array>({
@@ -173,13 +205,13 @@ class NodeH2Sidecar {
         controller = next;
       },
       cancel: (): void => {
-        void this.#write({ type: 'cancel', id });
+        void this.#write({ type: 'cancel', id }).catch(() => {});
         this.#pushes.delete(id);
-        this.#pushHealth = { ready: false, reason: 'LINE PUSH response was cancelled' };
+        this.#setHealth(laneId, { ready: false, reason: 'LINE PUSH response was cancelled' });
       },
     });
     const headers = new Promise<SidecarPushHeaders>((resolve, reject) => {
-      this.#pushes.set(id, { resolve, reject, controller });
+      this.#pushes.set(id, { laneId, resolve, reject, controller });
     });
     const onAbort = (): void => {
       void this.#write({ type: 'cancel', id });
@@ -293,7 +325,7 @@ class NodeH2Sidecar {
               );
               continue;
             }
-            this.#pushHealth = { ready: true };
+            this.#setHealth(pendingPush.laneId, { ready: true });
             pendingPush.resolve(response);
             continue;
           }
@@ -306,7 +338,10 @@ class NodeH2Sidecar {
             pendingPush?.controller?.close();
             this.#pushes.delete(response.id);
             if (pendingPush !== undefined) {
-              this.#pushHealth = { ready: false, reason: 'LINE PUSH stream ended' };
+              this.#setHealth(pendingPush.laneId, {
+                ready: false,
+                reason: 'LINE PUSH stream ended',
+              });
             }
             continue;
           }
@@ -326,8 +361,8 @@ class NodeH2Sidecar {
 
   #finishPushError(id: number, error: Error): void {
     const pending = this.#pushes.get(id);
-    this.#pushHealth = { ready: false, reason: error.message };
     if (pending === undefined) return;
+    this.#setHealth(pending.laneId, { ready: false, reason: error.message });
     this.#pushes.delete(id);
     pending.controller?.error(error);
     pending.reject(error);

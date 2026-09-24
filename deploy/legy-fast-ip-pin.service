@@ -1,0 +1,20 @@
+[Unit]
+Description=Pin legy/gf to the fastest measured LINE edge IPs
+Documentation=file:///opt/line-first-response/current/docs/runbook.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/line-first-response/current
+ExecStart=/bin/bash /opt/line-first-response/current/deploy/pin-legy-fast-ips.sh --apply
+
+# Never restart the worker here. The reply scout re-rolls its slowest reply
+# lane onto a new connection every few minutes (transport/reply-scout.ts) and
+# a new connection resolves from the new pin, so a faster address is adopted
+# with zero dropped replies. Restarting on every pin run would trade a
+# theoretical improvement for a guaranteed reconnect of every bot.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=legy-fast-ip-pin

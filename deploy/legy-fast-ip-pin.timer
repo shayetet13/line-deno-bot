@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodically re-measure and pin the fastest LINE edge IPs
+
+[Timer]
+# First run shortly after boot, then hourly: edge performance shifts over the
+# day, and a run costs ~30s of a few curl connections. New connections pick up
+# the pin (the reply scout re-rolls its slowest lane every few minutes), so
+# nothing is restarted.
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=legy-fast-ip-pin.service
+
+[Install]
+WantedBy=timers.target

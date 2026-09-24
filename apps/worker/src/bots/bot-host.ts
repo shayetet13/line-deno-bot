@@ -186,6 +186,7 @@ export class BotHost {
         // keeps its first network request inside the shared gate; later
         // keep-alives are cheap reuse probes and stay independent.
         await runtime.warmer.start(controller.signal);
+        runtime.scout?.start(controller.signal);
         return { runtime, controller };
       };
       const connected = await (o.connectionWarmupGate === undefined
@@ -245,6 +246,7 @@ export class BotHost {
     await runtime.adapter.stop().catch(() => {});
     await this.#running;
     runtime.warmer.stop();
+    runtime.scout?.stop();
     runtime.lanePool?.close();
     runtime.warmClient?.close();
     runtime.pushClient.close();

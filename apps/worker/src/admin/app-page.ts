@@ -167,12 +167,17 @@ function renderSpeedLog(status) {
     row('LINE TRIGGER-REPLY', cross.line_round_trip, 30),
     row('RPC (send ACK)', spans.send, 19),
     row('INBOUND (LINE->เรา)', cross.inbound, 11),
+    row('CPU LOOP LAG' + (status?.host?.shard ? ' ' + status.host.shard : ''), status?.host?.loopLagMs, 5),
     'calls=' + String(metrics.counters?.line_calls ?? 0) + '  worker=' + String(status?.workerId ?? '—'),
   ];
   const el = $('speedLog');
   el.textContent = lines.join('\\n');
   const samples = [cross.line_round_trip, spans.send, cross.inbound];
-  el.className = 'speed-log ' + (samples.some((s) => s?.p95 !== undefined && s.p95 > 30) ? 'bad' : '');
+  // Loop lag has its own, much lower line: a few ms of it is already a
+  // machine that is short of CPU for the bots it runs.
+  const starved = (status?.host?.loopLagMs?.p95 ?? 0) > 5;
+  el.className = 'speed-log ' +
+    (starved || samples.some((s) => s?.p95 !== undefined && s.p95 > 30) ? 'bad' : '');
 }
 
 async function loadSpeedStatus() {

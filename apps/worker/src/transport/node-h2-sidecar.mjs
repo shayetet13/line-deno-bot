@@ -64,7 +64,9 @@ async function sessionFor(laneId, origin) {
 
   const url = new URL(origin);
   const address = await publicAddressFor(url.hostname);
-  const ticket = tlsTickets.get(origin);
+  // Tickets are kept per session key, not per origin: bots sharing this
+  // process must not resume each other's TLS sessions.
+  const ticket = tlsTickets.get(key);
   const session = connectHttp2(origin, {
     createConnection: () => {
       const socket = connectTls({
@@ -75,7 +77,7 @@ async function sessionFor(laneId, origin) {
         ...(ticket ? { session: ticket } : {}),
       });
       socket.setNoDelay(true);
-      socket.on('session', (nextTicket) => tlsTickets.set(origin, nextTicket));
+      socket.on('session', (nextTicket) => tlsTickets.set(key, nextTicket));
       return socket;
     },
   });

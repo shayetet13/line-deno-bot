@@ -14,6 +14,9 @@ import { compileRules } from '../core/rules/compile.ts';
 import type { Clock } from '../lib/clock.ts';
 import type { Logger } from '../logging/logger.ts';
 import { MetricsRecorder } from '../metrics/recorder.ts';
+import { threadLoopLag } from '../metrics/loop-lag.ts';
+import type { LatencySnapshot } from '../metrics/ring.ts';
+import { threadLabel } from '../lib/thread.ts';
 import { AlertEvaluator, type AlertThresholds } from '../monitoring/alerts.ts';
 import { RecoveryPlanner } from '../monitoring/recovery.ts';
 import type { RecoveryExecutor } from './recovery-executor.ts';
@@ -66,6 +69,8 @@ export interface WorkerOptions {
   /** How often to evaluate alerts. Off the hot path by construction. */
   monitorIntervalMs?: number;
   timer?: TimerLike;
+  /** This thread's event-loop lag. Defaults to the per-thread monitor. */
+  loopLag?: { snapshot(): LatencySnapshot | undefined };
 }
 
 /** The handle type differs between runtimes, so it stays opaque here. */
@@ -146,6 +151,8 @@ export class Worker {
       ...(options.racer === undefined ? {} : { race: options.racer }),
       ...(options.warmer === undefined ? {} : { warmer: options.warmer }),
       ...(options.lanePool === undefined ? {} : { lanePool: options.lanePool }),
+      loopLag: options.loopLag ?? threadLoopLag(),
+      shard: threadLabel(),
     });
 
     // Rules come from a file that is already parsed, and the sender is

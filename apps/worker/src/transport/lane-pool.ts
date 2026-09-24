@@ -114,6 +114,9 @@ export interface LaneStat {
   available?: boolean;
   /** False when routing deliberately excludes this lane. */
   routeEligible?: boolean;
+  /** Tail-aware estimate over the read-only preflight probes — the number the
+   * background scout ranks reply lanes by. */
+  preflightPredictedMs?: number | undefined;
   /** Accumulated rabbits/turtles for this route. Send lanes only — nothing
    * else produces evidence a reply route can be judged on. */
   score?: LaneScore;
@@ -122,7 +125,34 @@ export interface LaneStat {
   currentSend?: boolean;
   /** True for a reply lane held back as a congestion spare. */
   spare?: boolean;
+  /** Who set the current pin: the background scout from live probe evidence,
+   * or the reply path itself. Only present on the pinned lane. */
+  pinnedBy?: 'scout' | 'reply';
 }
+
+/** One reply lane as the background scout sees it. Everything the scout
+ * decides with comes from here, so it can never rank on a number the router
+ * does not also hold. */
+export interface ReplyLaneView {
+  id: number;
+  /** Routable and neither parked nor hidden: a reply could use it now. */
+  usable: boolean;
+  /** Not excluded by the raw-breach bypass or the losing-tail ceiling. */
+  eligible: boolean;
+  spare: boolean;
+  pinned: boolean;
+  /** Requests on the lane other than background probes. */
+  inFlight: number;
+  probing: boolean;
+  preflightPredictedMs: number | undefined;
+  preflightSamples: number;
+  preflightLastMono: number | undefined;
+}
+
+/** Warn at most this often while receive lanes stay saturated. Logging every
+ * multiplexed poll turned a steady condition into a log flood — itself CPU
+ * taken from the reply path. */
+const SATURATION_WARN_INTERVAL_MS = 60 * MS_PER_SECOND;
 
 /** Detects the connection-lifecycle close LINE/edge sends routinely
  * (Playbook §7.12). `NO_ERROR` still means the request did not complete. */
@@ -161,6 +191,17 @@ export class LanePool {
   /** The breach that cleared the pin, held until the next pick so the switch
    * can be reported as one line naming both lanes. */
   #lastUnpin: { lane: number; rttMs: number } | undefined;
+  /** True when the pin was chosen by the background scout from live probe
+   * evidence rather than by the reply path (see `transport/reply-scout.ts`). */
+  #scoutPinned = false;
+  /** Background read-only probes currently on each lane. A probe shares the
+   * HTTP/2 session with a reply without queueing it, so it must not make the
+   * pinned lane look busy and push a live reply onto a slower route. */
+  readonly #probeInFlight: Uint16Array;
+  #sendsInFlight = 0;
+  #lastSendStartMono = Number.NEGATIVE_INFINITY;
+  #saturatedWarnAtMono = Number.NEGATIVE_INFINITY;
+  #saturatedSuppressed = 0;
 
   constructor(options: LanePoolOptions) {
     const lanes = options.lanes ?? DEFAULTS.lanes;
@@ -212,6 +253,7 @@ export class LanePool {
     this.#clock = options.clock;
     this.#logger = options.logger;
     this.#slowSendStreak = new Uint8Array(lanes);
+    this.#probeInFlight = new Uint16Array(lanes);
     this.#opts = {
       lanes,
       sampleWindow: options.sampleWindow ?? DEFAULTS.sampleWindow,
@@ -315,6 +357,13 @@ export class LanePool {
     req: Request,
     measurement: LaneMeasurement,
   ): Promise<Response> {
+    const probe = measurement === 'preflight';
+    const reply = measurement === 'send';
+    if (probe) this.#probeInFlight[lane.id] = (this.#probeInFlight[lane.id] ?? 0) + 1;
+    if (reply) {
+      this.#sendsInFlight += 1;
+      this.#lastSendStartMono = this.#clock.monotonic();
+    }
     try {
       // Only a real reply send says whether a reply route is slow. A poll can
       // legitimately wait at LINE before returning, while warm HEAD is a
@@ -331,6 +380,102 @@ export class LanePool {
     } catch (error: unknown) {
       this.#afterFailure(lane, error);
       throw error;
+    } finally {
+      if (probe) this.#probeInFlight[lane.id] = (this.#probeInFlight[lane.id] ?? 1) - 1;
+      if (reply) this.#sendsInFlight -= 1;
+    }
+  }
+
+  /** Real replies on the wire right now. The scout never probes while one is. */
+  get sendsInFlight(): number {
+    return this.#sendsInFlight;
+  }
+
+  /** Monotonic start of the latest real reply. */
+  get lastSendStartMono(): number {
+    return this.#lastSendStartMono;
+  }
+
+  get currentSendLaneId(): number | undefined {
+    return this.#currentSendLaneId;
+  }
+
+  /** The reply band as the background scout sees it. */
+  replyLaneViews(): ReplyLaneView[] {
+    const now = this.#clock.monotonic();
+    const reserved = this.#opts.sendReservedLanes;
+    const band = reserved === 0 ? this.#lanes : this.#lanes.slice(0, reserved);
+    return band.map((lane) => {
+      const probes = this.#probeInFlight[lane.id] ?? 0;
+      return {
+        id: lane.id,
+        usable: lane.isRoutable() && (this.#cooldownUntil.get(lane.id) ?? 0) <= now,
+        eligible: !this.#isFastBypassed(lane.id, now) && this.#isSendTailEligible(lane),
+        spare: this.#isSpare(lane.id),
+        pinned: lane.id === this.#currentSendLaneId,
+        inFlight: lane.inFlight - probes,
+        probing: probes > 0,
+        preflightPredictedMs: lane.predictedRttFor('preflight'),
+        preflightSamples: lane.sampleCountFor('preflight'),
+        preflightLastMono: lane.lastRttAtFor('preflight'),
+      };
+    });
+  }
+
+  /** Pins replies to `laneId` on the background scout's evidence. Refused for
+   * a lane outside the reply band, not routable, or excluded by the tail
+   * ceiling or the raw-breach bypass — the scout cannot overrule the router's
+   * own vetoes. */
+  promoteSendLane(laneId: number, detail: Record<string, unknown> = {}): boolean {
+    const view = this.replyLaneViews().find((lane) => lane.id === laneId);
+    if (view === undefined || !view.usable || !view.eligible) return false;
+    const from = this.#currentSendLaneId;
+    this.#currentSendLaneId = laneId;
+    this.#scoutPinned = true;
+    this.#lastUnpin = undefined;
+    if (from !== laneId) {
+      this.#logger.info('reply lane pinned by scout', { from, to: laneId, ...detail });
+    }
+    return true;
+  }
+
+  /**
+   * Replaces one idle, unpinned reply lane with a fresh physical connection,
+   * hidden from replies until the caller has measured it and calls
+   * {@link revealLane}. LINE's edge spreads connections over backends, so a
+   * new connection is how a faster route is found; doing it here, off the
+   * reply path, means no live reply ever pays the TCP/TLS setup.
+   */
+  async rerollLane(laneId: number, origin: string): Promise<boolean> {
+    const lane = this.#lanes[laneId];
+    const others = this.replyLaneViews().filter((view) => view.id !== laneId && view.usable);
+    if (
+      this.#closed || lane === undefined || !lane.isRoutable() || lane.inFlight > 0 ||
+      laneId === this.#currentSendLaneId || others.length === 0
+    ) return false;
+    this.#cooldownUntil.set(laneId, Number.POSITIVE_INFINITY);
+    lane.recycle();
+    this.#fastBypassUntil.delete(laneId);
+    this.#slowSendStreak[laneId] = 0;
+    try {
+      const response = await lane.send(new Request(origin, { method: 'HEAD' }), 'warm');
+      await response.body?.cancel();
+      return true;
+    } catch (error: unknown) {
+      this.#afterFailure(lane, error);
+      this.revealLane(laneId);
+      this.#logger.warn('reply lane re-roll failed', {
+        lane: laneId,
+        reason: error instanceof Error ? error.message : 'unknown',
+      });
+      return false;
+    }
+  }
+
+  /** Ends the hiding {@link rerollLane} started. A slow-send park is left alone. */
+  revealLane(laneId: number): void {
+    if (this.#cooldownUntil.get(laneId) === Number.POSITIVE_INFINITY) {
+      this.#cooldownUntil.delete(laneId);
     }
   }
 
@@ -370,6 +515,10 @@ export class LanePool {
         score: lane.score,
         currentSend: lane.id === this.#currentSendLaneId,
         spare,
+        preflightPredictedMs: lane.predictedRttFor('preflight'),
+        ...(lane.id === this.#currentSendLaneId
+          ? { pinnedBy: this.#scoutPinned ? 'scout' as const : 'reply' as const }
+          : {}),
       };
     });
   }
@@ -380,6 +529,7 @@ export class LanePool {
   }
 
   #pick(role: LaneRole, measurement: LaneMeasurement, forcedLaneId?: number): Lane {
+    if (forcedLaneId !== undefined) return this.#pickForced(role, forcedLaneId);
     const now = this.#clock.monotonic();
     const usable = this.#lanes.filter(
       (lane) => lane.isRoutable() && (this.#cooldownUntil.get(lane.id) ?? 0) <= now,
@@ -392,25 +542,6 @@ export class LanePool {
         lanes: this.#lanes.length,
       });
     }
-    if (forcedLaneId !== undefined) {
-      if (role !== 'send') {
-        throw new TransientTransportError(
-          'lane pool: forced lane is only valid for send preflight',
-          {
-            role,
-            forcedLaneId,
-          },
-        );
-      }
-      const forced = pool.find((lane) => lane.id === forcedLaneId);
-      if (forced === undefined) {
-        throw new TransientTransportError('lane pool: forced send lane is not routable', {
-          forcedLaneId,
-          candidates: pool.map((lane) => lane.id),
-        });
-      }
-      return forced;
-    }
     // Prefer an uncontended receive lane.  This is deliberately a soft cap:
     // LINEJS can issue a background fetch outside the dedicated poll loop, and
     // rejecting that fetch when every receive lane has one stream made the
@@ -422,13 +553,7 @@ export class LanePool {
       : pool.filter((lane) => lane.inFlight < this.#opts.maxPollInFlightPerLane);
     const saturated = role !== 'send' && underCap.length === 0;
     const bounded = saturated ? pool : underCap;
-    if (saturated) {
-      this.#logger.warn('receive lanes saturated; multiplexing least-loaded lane', {
-        role,
-        lanes: pool.length,
-        maxPollInFlightPerLane: this.#opts.maxPollInFlightPerLane,
-      });
-    }
+    if (saturated) this.#warnSaturated(role, pool.length, now);
     if (measurement === 'warm') {
       // Refresh the least-recently warmed idle lane forever, not merely until
       // every lane has one sample. Settling on the lowest HEAD RTT left every
@@ -469,9 +594,60 @@ export class LanePool {
     return bounded.reduce((best, lane) => this.#beats(lane, best, measurement) ? lane : best);
   }
 
+  /** A forced request is a background probe of one exact reply lane. It may
+   * target a lane the router is hiding — a re-rolled connection being measured
+   * before replies may use it — but never a lane outside the reply band. */
+  #pickForced(role: LaneRole, forcedLaneId: number): Lane {
+    if (role !== 'send') {
+      throw new TransientTransportError('lane pool: forced lane is only valid for send preflight', {
+        role,
+        forcedLaneId,
+      });
+    }
+    const reserved = this.#opts.sendReservedLanes;
+    const forced = this.#lanes.find((lane) =>
+      lane.id === forcedLaneId && lane.isRoutable() && (reserved === 0 || lane.id < reserved)
+    );
+    if (forced === undefined) {
+      throw new TransientTransportError('lane pool: forced send lane is not routable', {
+        forcedLaneId,
+        replyBand: reserved,
+      });
+    }
+    return forced;
+  }
+
+  #warnSaturated(role: LaneRole, lanes: number, now: number): void {
+    if (now - this.#saturatedWarnAtMono < SATURATION_WARN_INTERVAL_MS) {
+      this.#saturatedSuppressed += 1;
+      return;
+    }
+    this.#logger.warn('receive lanes saturated; multiplexing least-loaded lane', {
+      role,
+      lanes,
+      maxPollInFlightPerLane: this.#opts.maxPollInFlightPerLane,
+      suppressedSinceLastWarning: this.#saturatedSuppressed,
+    });
+    this.#saturatedWarnAtMono = now;
+    this.#saturatedSuppressed = 0;
+  }
+
+  /** The scout's pin, while the router's own vetoes still allow it. Any lane
+   * of the reply band qualifies — the scout ranks spares too, so the fastest
+   * connection carries replies wherever it happens to sit. */
+  #scoutPin(pool: Lane[], now: number): Lane | undefined {
+    if (!this.#scoutPinned) return undefined;
+    const lane = pool.find((candidate) => candidate.id === this.#currentSendLaneId);
+    if (lane === undefined || this.#isFastBypassed(lane.id, now)) return undefined;
+    return this.#isSendTailEligible(lane) ? lane : undefined;
+  }
+
   /**
    * Reply routing, in the order asked for:
    *
+   *  0. the scout's pin, when the background scout runs: it probes every
+   *     reply lane continuously and moves the pin only to a lane that is
+   *     measurably faster, so this is the fastest known route and it is warm
    *  1. the lane replies are already pinned to, while it is still fast and
    *     idle — staying put is the whole point, and it is what keeps one
    *     connection hot instead of spreading replies over lanes that then go
@@ -500,7 +676,13 @@ export class LanePool {
     // bad, so delivery is never blocked by an over-strict selector.
     const tailSafe = unbypassed.filter((lane) => this.#isSendTailEligible(lane));
     const primary = tailSafe.length > 0 ? tailSafe : unbypassed;
-    const idle = (lane: Lane): boolean => lane.inFlight === 0;
+    // A background probe multiplexes beside a reply; it never queues one.
+    const idle = (lane: Lane): boolean => lane.inFlight - (this.#probeInFlight[lane.id] ?? 0) === 0;
+
+    // 0. The scout's pin: ranked on continuous live probes of every reply
+    //    lane, so it is the fastest route known right now.
+    const scoutPin = this.#scoutPin(pool, now);
+    if (scoutPin !== undefined && idle(scoutPin)) return scoutPin;
     const timed = (lane: Lane): boolean => this.#hasFreshSample(lane, 'send', now);
     const idlePrimary = primary.filter(idle);
     const fastPrimary = primary.filter((lane) => this.#isFastLane(lane));
@@ -512,7 +694,8 @@ export class LanePool {
     // If the pin still names a fast lane and it is merely busy, every choice
     // below is congestion routing and must leave the pin where it is —
     // working around a queue is not a change of preference.
-    const busyPin = this.#pinnedSendLane(fastPrimary, now) !== undefined;
+    const busyPin = scoutPin !== undefined ||
+      this.#pinnedSendLane(fastPrimary, now) !== undefined;
     const take = (lane: Lane): Lane => busyPin ? lane : this.#pinSend(lane);
 
     // 2. Another fast, free primary lane.
@@ -594,6 +777,7 @@ export class LanePool {
     }
     this.#lastUnpin = undefined;
     this.#currentSendLaneId = lane.id;
+    this.#scoutPinned = false;
     return lane;
   }
 

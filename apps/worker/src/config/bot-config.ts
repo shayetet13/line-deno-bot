@@ -77,6 +77,11 @@ export interface BotConfig {
    * keeps one fetch at a time. Cannot be combined with
    * `squarePollRaceWidth > 1`. */
   squarePollStagger: number;
+  /** Gap between background read-only probes of the reply lanes (see
+   * `transport/reply-scout.ts`). Each probe measures one lane, keeps it warm,
+   * and lets the pin move to a lane that has become measurably faster. 0
+   * turns the scout off and leaves replies on the reply-path pin alone. */
+  replyProbeIntervalMs: number;
 }
 
 class Problems {
@@ -238,6 +243,13 @@ export function parseBotConfig(raw: unknown, source = '<inline>'): BotConfig {
     p.add('squarePollStagger: cannot be combined with squarePollRaceWidth > 1');
   }
 
+  // One probe per interval, spread over the reply lanes. Below 200ms the
+  // probes stop being background work; the scout is off at 0.
+  const replyProbeIntervalMs = p.int(o['replyProbeIntervalMs'], 'replyProbeIntervalMs', 1_000, 0);
+  if (replyProbeIntervalMs > 0 && replyProbeIntervalMs < 200) {
+    p.add('replyProbeIntervalMs: expected 0 (off) or an integer >= 200');
+  }
+
   const config: BotConfig = {
     botId,
     ownerId,
@@ -266,6 +278,7 @@ export function parseBotConfig(raw: unknown, source = '<inline>'): BotConfig {
     pollQuietMs,
     squarePollRaceWidth,
     squarePollStagger,
+    replyProbeIntervalMs,
   };
 
   if (p.list.length > 0) {

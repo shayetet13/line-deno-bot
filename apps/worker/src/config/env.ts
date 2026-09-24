@@ -18,6 +18,20 @@ export interface WorkerConfig {
   /** Process-wide cap for connect/reconnect lane warm-up work. Live replies
    * never enter this gate. */
   connectionWarmupConcurrency: number;
+  /** Worker threads that run bots in `--multi-bot` mode. {@link AUTO_BOT_SHARDS}
+   * picks one per spare core; 0 keeps every bot on the console thread. */
+  botShards: number;
+}
+
+/** `BOT_SHARDS` unset: one shard per core, leaving one for the console,
+ * nginx and the kernel's network work. */
+export const AUTO_BOT_SHARDS = -1;
+const MAX_AUTO_BOT_SHARDS = 8;
+
+/** The shard count to actually run with. */
+export function resolveBotShards(configured: number, cores: number): number {
+  if (configured !== AUTO_BOT_SHARDS) return configured;
+  return Math.max(1, Math.min(MAX_AUTO_BOT_SHARDS, cores - 1));
 }
 
 type EnvSource = Record<string, string | undefined>;
@@ -91,6 +105,7 @@ export function loadConfig(source: EnvSource = Deno.env.toObject()): WorkerConfi
       'CONNECTION_WARMUP_CONCURRENCY',
       DEFAULTS.connectionWarmupConcurrency,
     ),
+    botShards: r.int('BOT_SHARDS', AUTO_BOT_SHARDS, 0),
   };
   if (r.errors.length > 0) {
     throw new ConfigError(`invalid worker config:\n- ${r.errors.join('\n- ')}`, {

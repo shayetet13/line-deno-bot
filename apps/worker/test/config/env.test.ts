@@ -1,7 +1,7 @@
 import { describe, it as test } from '@std/testing/bdd';
 import { expect } from '@std/expect';
 import { unreachable } from '@std/assert';
-import { loadConfig } from '../../src/config/env.ts';
+import { AUTO_BOT_SHARDS, loadConfig, resolveBotShards } from '../../src/config/env.ts';
 import { DEFAULTS } from '../../src/config/constants.ts';
 import { ConfigError } from '../../src/errors/base.ts';
 
@@ -52,6 +52,21 @@ describe('loadConfig', () => {
       expect(errors.join('\n')).toContain('LOG_LEVEL');
       expect(errors.join('\n')).toContain('RATE_LIMIT_REFILL_PER_SEC');
     }
+  });
+
+  test('BOT_SHARDS defaults to auto, accepts 0 (in-process) and rejects negatives', () => {
+    expect(loadConfig({}).botShards).toBe(AUTO_BOT_SHARDS);
+    expect(loadConfig({ BOT_SHARDS: '0' }).botShards).toBe(0);
+    expect(loadConfig({ BOT_SHARDS: '3' }).botShards).toBe(3);
+    expect(() => loadConfig({ BOT_SHARDS: '-2' })).toThrow(ConfigError);
+  });
+
+  test('auto shards leave one core for the console and cap at eight', () => {
+    expect(resolveBotShards(AUTO_BOT_SHARDS, 1)).toBe(1);
+    expect(resolveBotShards(AUTO_BOT_SHARDS, 4)).toBe(3);
+    expect(resolveBotShards(AUTO_BOT_SHARDS, 32)).toBe(8);
+    expect(resolveBotShards(2, 32)).toBe(2);
+    expect(resolveBotShards(0, 4)).toBe(0);
   });
 
   test('empty string is treated as unset', () => {

@@ -21,9 +21,10 @@
   ],
 
   "dryRun": true,
-  "lanes": 6,
-  "sendReservedLanes": 2,
+  "lanes": 7,
+  "sendReservedLanes": 3,
   "sendSpareLanes": 1,
+  "replyProbeIntervalMs": 1000,
   "fastRouteThresholdMs": 23,
   "warmIntervalMs": 15000,
   "pollIntervalMs": 0,

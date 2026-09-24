@@ -28,6 +28,14 @@ const badges = (stats: LaneStat[], clock?: FakeClock, maxAge?: number): string[]
   classify(stats, clock, maxAge).map((v) => v.badge);
 
 describe('classifyLanes', () => {
+  test('a scout pin is the only HOT reply lane, even before a real reply ran on it', () => {
+    expect(badges([
+      lane({ id: 0, role: 'send', medianRttMs: 17, lastSampleMono: 0 }),
+      lane({ id: 1, role: 'send', currentSend: true, pinnedBy: 'scout', preflightRttMs: 9 }),
+      lane({ id: 2, role: 'poll', medianRttMs: 11, lastSampleMono: 0 }),
+    ])).toEqual(['standby', 'hot', 'hot']);
+  });
+
   test('the lowest fresh application RTT is the only HOT lane', () => {
     const clock = new FakeClock();
     expect(badges([

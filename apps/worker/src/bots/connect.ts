@@ -5,7 +5,7 @@ import type { WorkerConfig } from '../config/env.ts';
 import { createRacingInbound } from '../adapters/linejs/racing-inbound.ts';
 import { type Device, resumeStoredSession } from '../adapters/linejs/login.ts';
 import { LinejsSender } from '../adapters/linejs/sender.ts';
-import { installLaneRoleHints } from '../adapters/linejs/lane-role.ts';
+import { installLaneRoleHints, type SendPreflightResult } from '../adapters/linejs/lane-role.ts';
 import { installReqseqTimer, installThriftEncodeTimer } from '../adapters/linejs/thrift-timing.ts';
 import { SquarePollQuietGate } from '../adapters/linejs/poll-quiet.ts';
 import { DryRunSender } from '../adapters/dry-run.ts';
@@ -14,6 +14,7 @@ import { systemClock } from '../lib/clock.ts';
 import type { Logger } from '../logging/logger.ts';
 import type { SessionStore } from '../session/store.ts';
 import { createH2PushFetch, createOwnedLanePool } from '../transport/index.ts';
+import { ReplyRouteScout } from '../transport/reply-scout.ts';
 import { createWarmHttpClient } from '../warm/http-client.ts';
 import { HOT_SEND_ORIGIN, TransportWarmer } from '../warm/warmer.ts';
 import { RecoveryExecutor } from '../worker/recovery-executor.ts';
@@ -120,10 +121,33 @@ export async function connectToLine(opts: {
     // HEAD only proves that TCP/TLS is up; Talk noop did not predict Square's
     // 19-23ms send path. Use a read-only Square RPC for the actual room on every
     // exact reply lane, and keep those probes separate from real send p50/p95.
-    const preflightRoom = bot.dedicatedRooms[0];
+    // With the scout on, take enough rounds that it can rank every lane — and
+    // pin the fastest — before the first key can arrive.
+    // Only an OpenChat id can take a Square read: a Talk or OA id would make
+    // every probe fail.
+    const preflightRoom = bot.dedicatedRooms[0] ??
+      bot.selectedRooms?.find((room) => room.startsWith('m'));
+    const scoutOn = bot.replyProbeIntervalMs > 0 && lanePool !== undefined;
     const preflight = laneHints === undefined || preflightRoom === undefined
       ? undefined
-      : await laneHints.preflightSendLanes(bot.sendReservedLanes, preflightRoom);
+      : await preflightRounds(
+        laneHints,
+        bot.sendReservedLanes,
+        preflightRoom,
+        scoutOn ? STARTUP_PREFLIGHT_ROUNDS : 1,
+      );
+    const scout = lanePool === undefined || laneHints === undefined ||
+        preflightRoom === undefined || !scoutOn
+      ? undefined
+      : new ReplyRouteScout({
+        pool: lanePool,
+        probe: (laneId) => laneHints.probeSendLane(laneId, preflightRoom),
+        clock: systemClock,
+        logger,
+        intervalMs: bot.replyProbeIntervalMs,
+        warmOrigin: SQUARE_RPC_ORIGIN,
+      });
+    scout?.evaluate();
     if (preflight !== undefined) {
       const failed = preflight.filter((probe) => !probe.ok);
       logger.info('reply lane preflight complete', {
@@ -225,6 +249,7 @@ export async function connectToLine(opts: {
       setRooms,
       warmer,
       lanePool,
+      scout,
       warmClient,
       pushClient,
       client,
@@ -241,3 +266,24 @@ export async function connectToLine(opts: {
 }
 
 export type LineRuntime = Awaited<ReturnType<typeof connectToLine>>;
+
+/** Where Square RPCs go in LINEJS's default (plain LEGY) mode. A re-rolled
+ * reply lane opens its connection here before it is probed. */
+const SQUARE_RPC_ORIGIN = 'https://legy.line-apps.com/SQ1';
+/** The scout ranks a lane only after three probes; take them at startup. */
+const STARTUP_PREFLIGHT_ROUNDS = 3;
+
+/** Runs the startup preflight `rounds` times and reports the last round —
+ * the one taken on connections that are warm by then. */
+async function preflightRounds(
+  hints: { preflightSendLanes: (lanes: number, room: string) => Promise<SendPreflightResult[]> },
+  lanes: number,
+  room: string,
+  rounds: number,
+): Promise<SendPreflightResult[]> {
+  let last: SendPreflightResult[] = [];
+  for (let round = 0; round < rounds; round += 1) {
+    last = await hints.preflightSendLanes(lanes, room);
+  }
+  return last;
+}

@@ -19,13 +19,19 @@ LINE bot ที่ออกแบบให้ **ชนะด้วยคำต�
 
 Runtime เป็น Deno เพราะ LINEJS เป็น Deno-first — ดู [ADR-0005](./docs/decisions.md)
 
-### Isolated worker budget
+### หลาย bot พร้อมกัน
 
-หนึ่ง bot ต้องมี worker process ของตัวเอง: `lanes: 6`, `sendReservedLanes: 2`, `sendSpareLanes: 1` (reply
-หลัก 1, reply spare 1, poll 4). จึงไม่มี event loop, GC, reconnect หรือ log burst ของ bot หนึ่งตัวมาหยุดอีก
-ตัว. สำหรับ 20 bot จะเป็น 20 worker + อย่างน้อย 140 LINE H2 connections (6 reply lanes + 1 PUSH ต่อ bot).
-`CONNECTION_WARMUP_CONCURRENCY=2` จำกัดเฉพาะ reconnect ภายใน worker เดียว; ไม่ใช่ send queue และไม่มีผลต่อ
-การส่งข้อความระหว่างแข่ง. Dashboard/alert ใช้ target p95 ของ LINE trigger→reply ที่ 30ms.
+`--multi-bot` รัน bot ใน **bot shard** (Worker thread) `BOT_SHARDS` ตัว — ค่าเริ่มคือจำนวน core − 1 —
+console กับทะเบียนบัญชีอยู่ thread หลัก, LINE connection ของแต่ละ bot อยู่ใน shard ของมัน bot ที่ decode
+หนักจึงไม่หน่วง bot ใน shard อื่น และใช้ได้ทุก core ([ADR-0011](./docs/decisions.md)). ต่อ bot: `lanes: 7`,
+`sendReservedLanes: 3`, `sendSpareLanes: 1` (reply 3 เส้นให้ scout เลือก, poll 4 เส้น) + PUSH หนึ่ง
+session ผ่าน Node sidecar ที่ใช้ร่วมกันต่อ thread. **ขนาดเครื่อง:** 20 bot ต้องการ dedicated vCPU อย่างน้อย 4 —
+1 vCPU กระโดดแน่นอน (runbook §10)
+
+Reply lane ถูกวัดต่อเนื่องด้วย scout: ยึด lane ที่เร็วที่สุดไว้ ย้ายเมื่อ lane อื่นเร็วกว่าชัดเจนเท่านั้น และเปิด connection
+ใหม่ให้ lane ที่ช้าเบื้องหลัง ([ADR-0010](./docs/decisions.md)). `CONNECTION_WARMUP_CONCURRENCY=2` จำกัดเฉพาะ
+การต่อ/ต่อใหม่ ไม่ใช่ send queue. Dashboard/alert ใช้ target p95 ของ LINE trigger→reply ที่ 30ms และแสดง
+event-loop lag ของ thread (สูง = CPU ไม่พอ)
 
 ## Workspace layout
 

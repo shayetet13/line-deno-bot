@@ -49,7 +49,7 @@ export const DASHBOARD_HTML = renderPage({
       <thead><tr><th>lane</th><th>route จริง</th><th>role</th><th>badge</th><th>คะแนน</th><th>app p50</th><th>app p95</th><th>route est.</th><th>preflight</th><th>warm rtt</th><th>sample age</th><th>in-flight</th><th>fails</th></tr></thead>
       <tbody id="lanes"></tbody>
     </table>
-    <p class="note">app p50/p95 = sendMessage จริงเท่านั้น · route est. = p50 + 35% ของช่วง p95−p50 ซึ่ง selector ใช้จริง · preflight = Square read-only สำหรับจัดลำดับเฉพาะเลนที่ยังไม่เคยส่ง และไม่ถูกนับเป็นเวลาส่งข้อความ · warm rtt = HEAD สำหรับอุ่น connection เท่านั้น ไม่ถูกนับเป็นเวลาส่งข้อความ · WAIT = ยังไม่มี send sample, sample เก่า, ถูกตัดเพราะเกิน 23ms, เป็น lane สำรอง, กำลังพัก cooldown หรือไม่พร้อม</p>
+    <p class="note">app p50/p95 = sendMessage จริงเท่านั้น · route est. = p50 + 35% ของช่วง p95−p50 ซึ่ง selector ใช้จริง · preflight = Square read-only ที่ scout ยิงวัดทุก reply lane ต่อเนื่อง (ค่าประมาณแบบเดียวกับ route est.) ใช้จัดอันดับว่า lane ไหนเร็วสุด และไม่ถูกนับเป็นเวลาส่งข้อความ · 📌🔭 = lane ที่ scout ปักหมุดไว้ ย้ายเฉพาะเมื่อเจอ lane ที่เร็วกว่าชัดเจน · warm rtt = HEAD สำหรับอุ่น connection เท่านั้น ไม่ถูกนับเป็นเวลาส่งข้อความ · WAIT = ยังไม่มี send sample, sample เก่า, ถูกตัดเพราะเกิน 23ms, เป็น lane สำรอง, กำลังพัก cooldown หรือไม่พร้อม</p>
     <p class="note">คะแนน: 🐰 = ส่งจริงที่จบในเกณฑ์เร็ว · 🐢 = เกินเกณฑ์ ตอนที่ไม่มีใครใช้เลนร่วม · เลขในวงเล็บ = ช้าเพราะใช้เลนพร้อมกัน ซึ่งวัดคิวไม่ใช่วัดเส้นทาง จึงไม่แจกเต่า · 📌 = เลนที่ reply ปักอยู่ตอนนี้ จะย้ายก็ต่อเมื่อเลนนั้นเกินเกณฑ์เอง · นับเฉพาะ lane ฝั่ง send และรีเซ็ตเมื่อ lane ถูก recycle เพราะเป็นเส้นทางใหม่</p>
     <p class="note">สำรอง = เลน reply ที่กันไว้ ไม่ใช้ตอนปกติ จะถูกเรียกใช้เมื่อเลนหลักไม่ว่างทุกเลน (reply ซ้อนกัน/หลายบอท) — ตอนใช้สำรองเพราะเลนเต็ม ตัวปัก 📌 จะไม่ย้าย เพราะถือเป็นการล้นชั่วคราว ไม่ใช่เปลี่ยนเลนหลัก</p>
   </section>
@@ -95,7 +95,7 @@ function renderReadiness(r) {
 
 // Every value below is a separately sampled rolling distribution. Percentiles
 // from different distributions are intentionally never added or subtracted.
-function renderLatencyBreakdown(metrics) {
+function renderLatencyBreakdown(metrics, host) {
   const spans = metrics?.spans ?? {};
   const crossHost = metrics?.crossHost ?? {};
   const counters = metrics?.counters ?? {};
@@ -139,7 +139,10 @@ function renderLatencyBreakdown(metrics) {
     tile('CODE ถึง transport', spans.code) +
     tile('Send RPC ทั้งก้อน', spans.send) +
     tile('เราเห็น → ACK', spans.local_total) +
-    tile('LINE trigger → reply', crossHost.line_round_trip, undefined, 'line-trigger-reply');
+    tile('LINE trigger → reply', crossHost.line_round_trip, undefined, 'line-trigger-reply') +
+    tile('CPU: event loop ช้า' + (host?.shard ? ' · ' + host.shard : ''), host?.loopLagMs,
+      host?.loopLagMs ? 'p99 ' + ms(host.loopLagMs.p99) + ' · max ' + ms(host.loopLagMs.max) +
+        ' — สูง = เครื่อง CPU ไม่พอ ทุก bot ใน thread นี้ช้าพร้อมกัน' : undefined);
 }
 
 // Rabbits and turtles come straight from the router's own tally. Nothing is
@@ -163,7 +166,7 @@ function renderLanes(lanes) {
   $('lanes').innerHTML = lanes.length === 0
     ? '<tr><td colspan="13" class="empty">ไม่ได้เปิด owned lanes</td></tr>'
     : lanes.map((l) =>
-        '<tr><td>#' + l.laneId + (l.currentSend ? ' 📌' : '') +
+        '<tr><td>#' + l.laneId + (l.currentSend ? (l.pinnedBy === 'scout' ? ' 📌🔭' : ' 📌') : '') +
         ' <span class="dim">' + l.state + '</span></td>' +
         '<td class="dim">' + (l.remoteOrigin ? l.remoteOrigin.replace(/^https?:\\/\\//, '') +
           (l.remoteAddress ? ' → ' + l.remoteAddress : '') : (l.remoteAddress || 'resolver')) + '</td>' +
@@ -174,7 +177,7 @@ function renderLanes(lanes) {
         '<td>' + ms(l.applicationRttMs) + '</td>' +
         '<td>' + ms(l.tailRttMs) + '</td>' +
         '<td>' + ms(l.predictedRttMs) + '</td>' +
-        '<td>' + ms(l.preflightRttMs) + '</td>' +
+        '<td>' + ms(l.preflightPredictedMs ?? l.preflightRttMs) + '</td>' +
         '<td>' + ms(l.warmRttMs) + '</td>' +
         '<td class="age">' + (age(l.sampleAgeMs) || '—') + '</td>' +
         '<td class="' + ((l.role === 'poll' && l.inFlight > 1) ? 'v-bad' : '') + '">' + l.inFlight + '</td>' +
@@ -211,7 +214,7 @@ async function tick() {
     $('stamp').textContent = 'up ' + Math.floor(s.uptimeMs / 1000) + 's · ' +
       new Date(s.generatedAtMs).toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok' });
     renderReadiness(s.readiness);
-    renderLatencyBreakdown(s.metrics);
+    renderLatencyBreakdown(s.metrics, s.host);
     renderLanes(s.lanes ?? []);
     renderRace(s.race);
     renderCounters(s.metrics?.counters);

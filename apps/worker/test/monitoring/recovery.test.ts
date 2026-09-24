@@ -45,6 +45,12 @@ describe('RecoveryPlanner', () => {
     expect(planner.rung).toBe('none');
   });
 
+  test('a CPU-starved host is observed but never reconnects anything', () => {
+    const { planner } = make();
+    expect(planner.next([alert('host-cpu-starved')])).toBeUndefined();
+    expect(planner.rung).toBe('none');
+  });
+
   test('a single spike cannot reach restart, however many times it is seen', () => {
     const { planner } = make();
     for (let i = 0; i < 20; i += 1) planner.next([alert('first-response-regression')]);

@@ -71,8 +71,10 @@ export interface AdminServerOptions {
    * client before the process actually dies; systemd's `Restart=always`
    * brings it back. Injectable so a test never actually exits the runner. */
   restart?: () => void;
-  /** Console accounts; never a source of LINE bot credentials. */
-  users: UsersStore;
+  /** Console accounts; never a source of LINE bot credentials. Absent inside a
+   * bot shard: account routes are served by the console thread, which owns
+   * the only writer of the account file. */
+  users?: UsersStore | undefined;
   /** Mark the session cookie `Secure`. False by default — this console is
    * commonly reached over plain HTTP via an SSH tunnel or a loopback bind. */
   secureCookies?: boolean;
@@ -654,6 +656,27 @@ function createAccountRoutes(
   };
 }
 
+/** Account routes for a signed-in request, answered on the console thread
+ * before anything is forwarded to a bot shard. `undefined` means "not an
+ * account path — forward it"; a failure is answered here, as JSON. */
+export function createAccountRouter(
+  opts: AccountRoutesOptions & { logger: Logger },
+): (req: Request) => Promise<Response | undefined> {
+  const routes = createAccountRoutes(opts);
+  return async (req: Request): Promise<Response | undefined> => {
+    try {
+      return await routes(req);
+    } catch (err: unknown) {
+      opts.logger.error('account request failed', {
+        path: new URL(req.url).pathname,
+        method: req.method,
+        error: errorMessage(err),
+      });
+      return json({ error: errorMessage(err) }, errorStatus(err));
+    }
+  };
+}
+
 /** Standalone account handler for requests that have no signed-in user (and so
  * no bot): the login page, the login POST and logout. */
 export function createAccountHandler(
@@ -681,7 +704,7 @@ export function createAdminHandler(
   const restart = options.restart ?? (() => {
     setTimeout(() => Deno.exit(0), 250);
   });
-  const account = createAccountRoutes({
+  const account = options.users === undefined ? undefined : createAccountRoutes({
     users: options.users,
     ...(options.secureCookies === undefined ? {} : { secureCookies: options.secureCookies }),
     ...(options.onUserRemoved === undefined ? {} : { onUserRemoved: options.onUserRemoved }),
@@ -700,7 +723,7 @@ export function createAdminHandler(
     const method = req.method;
 
     try {
-      const accountResponse = await account(req);
+      const accountResponse = await account?.(req);
       if (accountResponse !== undefined) return accountResponse;
 
       if (pathname === '/rules' && method === 'GET') return html(RULES_HTML);

@@ -1,6 +1,7 @@
 import type { RaceStats } from '../adapters/racing.ts';
 import type { Clock } from '../lib/clock.ts';
 import type { MetricsRecorder, MetricsSnapshot } from '../metrics/recorder.ts';
+import type { LatencySnapshot } from '../metrics/ring.ts';
 import type { ReadinessFsm, ReadinessSnapshot } from '../readiness/state.ts';
 import type { LanePool } from '../transport/lane-pool.ts';
 import type { WarmerStatus } from '../warm/warmer.ts';
@@ -18,6 +19,15 @@ export interface StatusSnapshot {
   metrics: MetricsSnapshot;
   race: RaceStats | undefined;
   warm: WarmerStatus | undefined;
+  /** The thread this bot runs on. Optional for older snapshots. */
+  host?: HostSnapshot | undefined;
+}
+
+export interface HostSnapshot {
+  /** Which bot shard (worker thread) runs this bot; absent in-process. */
+  shard: string | undefined;
+  /** How late this thread's event loop fires a timer. High = CPU-starved. */
+  loopLagMs: LatencySnapshot | undefined;
 }
 
 export interface StatusSourceOptions {
@@ -30,6 +40,8 @@ export interface StatusSourceOptions {
   race?: { stats: RaceStats } | undefined;
   warmer?: { status: WarmerStatus } | undefined;
   sampleMaxAgeMs?: number | undefined;
+  loopLag?: { snapshot(): LatencySnapshot | undefined } | undefined;
+  shard?: string | undefined;
 }
 
 /**
@@ -64,6 +76,9 @@ export class StatusSource {
       metrics: o.metrics.snapshot(),
       race: o.race?.stats,
       warm: o.warmer?.status,
+      ...(o.loopLag === undefined && o.shard === undefined
+        ? {}
+        : { host: { shard: o.shard, loopLagMs: o.loopLag?.snapshot() } }),
     };
   }
 }

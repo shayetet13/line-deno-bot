@@ -24,6 +24,14 @@ ExecStart=/root/.deno/bin/deno task serve --config /opt/line-first-response/conf
 Restart=always
 RestartSec=5
 
+# Twenty bots hold ~8 HTTP/2 connections each plus the console's sockets.
+LimitNOFILE=65536
+# The replies are the only latency-critical work on this host: ahead of
+# nginx, cron and the pin timer when the CPU is contended. Not realtime.
+Nice=-5
+# Bots run in worker threads, one per core minus one by default (BOT_SHARDS
+# in /opt/line-first-response/.env overrides; 0 = all on one thread).
+
 # SIGTERM reaches the CLI's handler, which stops the receiver and waits for
 # in-flight replies. Give it room to finish one before being killed.
 KillSignal=SIGTERM

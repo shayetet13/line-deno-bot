@@ -139,15 +139,19 @@ alert เรื่อง first-response regression เทียบกับ base
 
 ทุก rule ต้อง "จริงต่อเนื่อง" ถึงจะยิง (ค่าตั้งต้น 60s, readiness 30s) — spike เดียวไม่ใช่ alert โดยตั้งใจ
 
-| alert                       | แปลว่า                                    | ดูต่อที่ไหน                                |
-| --------------------------- | ---------------------------------------- | -------------------------------------- |
-| `readiness-loss`            | ไม่ ARMED นานเกิน 30s                      | `/api/status` → `readiness.reason`     |
-| `no-lane-available`         | ไม่มี lane ที่ route ได้เลย                   | `/api/status` → `lanes[].badge`        |
-| `failure-rate`              | send ล้มเกิน 5% (critical เมื่อเกิน 20%)      | log `send failed` + `class`            |
-| `first-response-regression` | p95 เกิน baseline × 1.5                   | เทียบ `release` ใน snapshot กับ baseline |
-| `missed-events`             | receive path หนึ่งไม่ชนะเลย — น่าจะตายเงียบ ๆ | `/api/status` → `race.wins`            |
+| alert                       | แปลว่า                                          | ดูต่อที่ไหน                                |
+| --------------------------- | ---------------------------------------------- | -------------------------------------- |
+| `readiness-loss`            | ไม่ ARMED นานเกิน 30s                            | `/api/status` → `readiness.reason`     |
+| `no-lane-available`         | ไม่มี lane ที่ route ได้เลย                         | `/api/status` → `lanes[].badge`        |
+| `failure-rate`              | send ล้มเกิน 5% (critical เมื่อเกิน 20%)            | log `send failed` + `class`            |
+| `first-response-regression` | p95 เกิน baseline × 1.5                         | เทียบ `release` ใน snapshot กับ baseline |
+| `missed-events`             | receive path หนึ่งไม่ชนะเลย — น่าจะตายเงียบ ๆ       | `/api/status` → `race.wins`            |
+| `host-cpu-starved`          | event loop ของ thread ช้า p99 > 10ms — CPU ไม่พอ | `/api/status` → `host` · §10           |
 
 `missed-events` ปิดอยู่ถ้า `racedSources < 2` — path เดียวชนะทุกอันคือพฤติกรรมถูกต้อง ไม่ใช่ปัญหา
+
+`host-cpu-starved` ไม่เรียก recovery ladder โดยเจตนา: reconnect ใช้ CPU เพิ่ม ไม่ได้ลด — แก้ด้วยเพิ่ม core หรือ
+`BOT_SHARDS` (§10)
 
 ---
 
@@ -225,9 +229,10 @@ secret มาจาก environment variable เท่านั้น (`LINE_EMAI
 เปลี่ยนจากข้อมูล ไม่ใช่เปลี่ยนทุกครั้งที่ ping แกว่ง (Phases §19) ตัวเลขอ้างอิงปัจจุบัน:
 
 - RTT จาก Tokyo host ไป `legy.line-apps.com` = **0.37ms**
-- lane-level HTTP RTT = **7.6ms** แต่ full send RTT = **~30ms** → ส่วนต่าง ~22ms คือ thrift encode/parse
-  ใน TypeScript ไม่ใช่ปัญหา network → **ย้าย region แก้ตรงนี้ไม่ได้** ดู experiment `native-encode-relay` ใน
-  `docs/experiments.md`
+- sendMessage (Square) ต่ำสุดที่วัดได้ **18.8ms** และ `writeThrift` จริงแค่ ~0.06ms (`docs/experiments.md`
+  `native-encode-relay`) → เวลาส่งเกือบทั้งหมดคือ **เวลาประมวลผลฝั่ง LINE** ไม่ใช่ network หรือโค้ดเรา — ย้าย
+  region หรือเขียน encoder ใหม่ไม่ช่วย. สิ่งที่ช่วยได้คือเลือก connection ที่ LINE map ไป backend เร็ว (reply scout,
+  ADR-0010) และ edge IP ที่เร็ว (`pin-legy-fast-ips.sh`, §10)
 
 ---
 
@@ -241,3 +246,73 @@ secret มาจาก environment variable เท่านั้น (`LINE_EMAI
 4. ค่อย deploy พร้อมดู `first-response-regression` เทียบ baseline เก่า
 
 `assertDeployable()` จะปฏิเสธถ้า dependency ไหน pin เป็น `latest` หรือ `main`
+
+---
+
+## 10. รองรับ bot 20 ตัวพร้อมกันโดยไม่กระโดด
+
+### ตัวเลขที่ลดได้ และที่ลดไม่ได้
+
+| ค่าบน dashboard        | ส่วนที่เป็นของ LINE                          | ส่วนที่เราลดได้                                                               |
+| --------------------- | ---------------------------------------- | ------------------------------------------------------------------------- |
+| SEND RPC (~19ms)      | ~18.5ms ประมวลผล sendMessage (ต่ำสุด 18.8) | หาง p95 — lane/connection ที่ช้า, CPU ไม่พอ                                   |
+| LINE→เรา (~13ms)      | เวลาก่อน LINE เปิดให้เห็นข้อความ              | ช่วงที่ poll ยังมองไม่เห็น: `squarePollStagger: 2` ลดได้ ~2–3ms แลกกับ request ×2 |
+| TRIGGER→REPLY (~25ms) | ผลรวมสองบรรทัดบนตามนาฬิกา LINE             | ผลรวมของสองช่องบน                                                          |
+
+**ต่ำกว่า ~18ms ต่อการส่งเป็นไปไม่ได้ เพราะเป็นเวลาของ LINE เอง.** เป้าที่ทำได้จริงคือ "ทุกครั้งอยู่ใกล้ค่าต่ำสุด": p95 ใกล้
+p50 และไม่มีครั้งไหนกระโดด
+
+### ขนาดเครื่อง
+
+CPU ขึ้นกับจำนวน poll ต่อวินาที (`pollIntervalMs: 0` ≈ 84 ครั้ง/วินาที/ห้อง) ไม่ใช่จำนวนข้อความ. จาก simulator
+(ADR-0011) บน core ที่เร็วกว่า Linode shared vCPU:
+
+| bot × ห้องที่ poll | ขั้นต่ำ   | แนะนำ                                |
+| --------------- | ------ | ------------------------------------ |
+| 20 × 1          | 2 vCPU | **4 dedicated vCPU**, `BOT_SHARDS=3` |
+| 20 × 2–4        | 4 vCPU | 8 dedicated vCPU, `BOT_SHARDS=6–7`   |
+
+**1 vCPU รับ 20 bot ไม่ได้โดยไม่กระโดด** ไม่ว่าจะจูนโค้ดแค่ไหน — ตอนจำลอง 20 process บน 1 core คำตอบช้าเพิ่มถึง
++180ms. ใช้ **Dedicated CPU** ไม่ใช่ Shared: shared vCPU มี steal time ซึ่งคือการกระโดดที่เราคุมไม่ได้
+
+### ตั้งค่าและตรวจ
+
+```bash
+# ใน /opt/line-first-response/.env  (ไม่ใส่ = core − 1 อัตโนมัติ, 0 = ทุก bot บน thread เดียวแบบเดิม)
+BOT_SHARDS=3
+
+# ครั้งเดียวหลัง release: sysctl สำหรับ RPC สั้น + timer เลือก edge IP เร็วสุดทุกชั่วโมง + unit ใหม่
+APP_ROOT=/opt/line-first-response bash /opt/line-first-response/current/deploy/enable-latency-tuning.sh
+bash deploy/tune-network.sh --check          # AES-NI, TLS 1.3 + HTTP/2 ไป LINE, steal time
+systemctl list-timers legy-fast-ip-pin.timer
+curl -s localhost:8791/api/status | jq '.host'   # shard ของ bot นี้ + loop lag
+```
+
+log ตอนเริ่มต้องมี `isolation : multi-user bot routing across N bot shard thread(s)`
+
+### อ่านอาการกระโดด
+
+| send RPC | CPU loop lag (`/app`, dashboard) | แปลว่า                                 | ทำอะไร                                |
+| -------- | -------------------------------- | ------------------------------------- | ------------------------------------- |
+| กระโดด   | กระโดดพร้อมกัน                     | เครื่องเรา CPU ไม่พอ                     | เพิ่ม core / `BOT_SHARDS` / ลดห้องที่ poll |
+| กระโดด   | นิ่ง (< 2ms)                       | route หรือ LINE — scout จะย้าย lane เอง | ดู log `reply lane pinned by scout`    |
+| นิ่ง       | สูง                               | ยังไม่กระทบ แต่ใกล้เต็ม                    | วางแผนเพิ่ม core                        |
+
+### Lane: ยึดเส้นเร็ว สลับเมื่อเจอเส้นที่เร็วกว่า (ADR-0010)
+
+- `replyProbeIntervalMs` (config ของ bot, ค่าเริ่ม 1000) — scout วัด reply lane ทีละเส้น; `0` = ปิด
+- dashboard: 📌🔭 = lane ที่ scout ปักไว้, คอลัมน์ preflight = ค่าที่ใช้จัดอันดับ
+- log: `reply lane pinned by scout` (ย้ายเพราะเจอเส้นเร็วกว่า),
+  `reply lane re-rolled onto a new connection` (เปิด connection ใหม่ให้เส้นที่ช้า — ทำระหว่างซ่อนจาก reply)
+- config แนะนำ: `"lanes": 7, "sendReservedLanes": 3, "sendSpareLanes": 1` → reply 3 เส้นให้เลือก, poll
+  4 เส้น
+
+### Docker
+
+ถ้ารันใน Docker บน Debian:
+
+- ใช้ `network_mode: host` เท่านั้น — bridge network เพิ่ม NAT/veth/conntrack ในทุก packet
+- sysctl ต้องตั้งที่ **host** (`tune-network.sh`) — container ใน host network แก้เองไม่ได้
+- bind-mount `/etc/hosts:/etc/hosts:ro` ไม่งั้น container ใช้สำเนาตอน start และไม่เห็น pin ใหม่ —
+  `pin-legy-fast-ips.sh` เขียนทับแบบคง inode เดิมไว้แล้ว bind mount จึงเห็นค่าใหม่ทันที
+- `BOT_SHARDS` ใส่ใน env ของ container; อย่าจำกัด `cpus:` ต่ำกว่าจำนวน shard + 1

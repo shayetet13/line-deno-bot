@@ -3,16 +3,24 @@ import { parseArgs } from '@std/cli/parse-args';
 import { createCombinedHandler } from '../admin/server.ts';
 import { UsersStore } from '../admin/users-store.ts';
 import { BotHost } from '../bots/bot-host.ts';
-import { BoundedConnectionWarmupGate } from '../bots/connection-warmup-gate.ts';
 import { BotRegistry } from '../bots/bot-registry.ts';
+import type { LineRuntime } from '../bots/connect.ts';
+import { BoundedConnectionWarmupGate } from '../bots/connection-warmup-gate.ts';
 import { createIsolatedHandler } from '../bots/isolated-routes.ts';
-import { createTenantRoutes } from '../bots/tenant-routes.ts';
-import { loadBotConfig } from '../config/bot-config.ts';
-import { loadConfig } from '../config/env.ts';
+import { type ShardedBotHost, ShardPool } from '../bots/shard-pool.ts';
+import { createShardedTenantRoutes, createTenantRoutes } from '../bots/tenant-routes.ts';
+import { type BotConfig, loadBotConfig } from '../config/bot-config.ts';
+import { loadConfig, resolveBotShards, type WorkerConfig } from '../config/env.ts';
 import { ConfigError } from '../errors/base.ts';
+import { systemClock } from '../lib/clock.ts';
 import { Logger } from '../logging/logger.ts';
-import { startStatusServer } from '../observability/server.ts';
+import { startThreadLoopLag } from '../metrics/loop-lag.ts';
+import { MetricsRecorder } from '../metrics/recorder.ts';
+import type { AlertEvaluator } from '../monitoring/alerts.ts';
+import { type RunningStatusServer, startStatusServer } from '../observability/server.ts';
+import { StatusSource } from '../observability/snapshot.ts';
 import { describeRelease } from '../release/describe.ts';
+import type { ReleaseManifest } from '../release/manifest.ts';
 import { FileSessionStore } from '../session/store.ts';
 import { writeErr, writeLine } from './console.ts';
 
@@ -35,7 +43,10 @@ Options
   --primary-owner <u>  Username that owns the bot given by --config. Default:
                        the first admin to sign in.
   --multi-bot          Multi-user console mode. Starts every owned bot and
-                       routes each signed-in person to their own bot.
+                       routes each signed-in person to their own bot. Bots
+                       run in BOT_SHARDS worker threads (default: one per
+                       core, minus one); BOT_SHARDS=0 keeps them all on the
+                       console thread.
   --port <n>           Operator console port (default 8791, loopback only).
   --no-serve           Do not start the console.
   --dry-run            Force dry run regardless of the config file.
@@ -94,24 +105,35 @@ function parse(args: string[]): Flags {
   };
 }
 
-async function main(): Promise<number> {
-  const flags = parse(Deno.args);
-  const env = loadConfig();
-  // Loaded up front only to fail fast on a broken file and to learn the
-  // primary bot's id; the host re-reads it on every (re)connect.
-  const bot = await loadBotConfig(flags.config);
-  const dryRun = bot.dryRun || flags.forceDryRun;
-  const logger = new Logger({ level: env.logLevel, base: { bot: bot.botId } });
+/** What the rest of `main` needs from whichever topology is running. */
+interface Topology {
+  handler: (req: Request) => Promise<Response>;
+  /** The primary bot's status source, or a placeholder when it runs in a shard. */
+  status: StatusSource;
+  alerts: AlertEvaluator | undefined;
+  /** The primary bot's live runtime; undefined when disconnected or sharded. */
+  runtime: LineRuntime | undefined;
+  isolation: string;
+  close(): Promise<void>;
+}
 
+interface TopologyDeps {
+  flags: Flags;
+  env: WorkerConfig;
+  bot: BotConfig;
+  logger: Logger;
+  users: UsersStore;
+  release: ReleaseManifest;
+}
+
+/** Every bot on this thread: `--multi-bot` with `BOT_SHARDS=0`, or the
+ * one-bot isolated process. */
+async function startInProcess(d: TopologyDeps): Promise<Topology> {
+  const { flags, env, logger, users, release } = d;
   const sessions = new FileSessionStore(flags.dir);
   // One gate for every account in this process. It is used only while a
   // connection is built or rebuilt; replies continue to submit concurrently.
   const connectionWarmupGate = new BoundedConnectionWarmupGate(env.connectionWarmupConcurrency);
-  // Credentials remain per bot. Isolated service instances should use a
-  // separate users file too, so their consoles cannot route to another bot.
-  const users = new UsersStore(flags.usersFile);
-  const release = await describeRelease(env);
-
   const makeHost = (botId: string, configPath: string): BotHost =>
     new BotHost({
       botId,
@@ -130,43 +152,124 @@ async function main(): Promise<number> {
   // process that would serve it already exited (this is the 2026-09-11
   // "dashboard is 502 because the bot won't log in" report). `BotHost.start`
   // therefore never rejects — it falls back to disconnected mode.
-  const primary = makeHost(bot.botId, flags.config);
+  const primary = makeHost(d.bot.botId, flags.config);
   await primary.start();
 
   const registry = flags.multiBot
-    ? new BotRegistry({
-      users,
-      logger,
-      primary,
-      createHost: makeHost,
-      botsDir: dirname(flags.config),
-      templatePath: flags.config,
-      primaryOwner: flags.primaryOwner,
-      ownedStartConcurrency: env.connectionWarmupConcurrency,
-    })
+    ? new BotRegistry({ ...registryOptions(d), primary, createHost: makeHost })
     : undefined;
-  if (registry !== undefined) {
-    // Multi-user console mode: restore every owned bot after a VPS restart.
-    void registry.startOwned().catch((err: unknown) => {
-      logger.error('starting other users’ bots failed', {
-        reason: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }
+  if (registry !== undefined) restoreOwned(registry, logger);
   const handler = registry === undefined
     ? createIsolatedHandler({ host: primary, users, sessions, release })
     : (() => {
       const tenant = createTenantRoutes({ registry, users, sessions, logger, release });
       return createCombinedHandler(tenant.admin, tenant.status, { users });
     })();
+  return {
+    handler,
+    status: primary.status,
+    alerts: primary.alerts,
+    runtime: primary.runtime,
+    isolation: registry === undefined
+      ? 'this process owns this bot only'
+      : 'multi-user bot routing enabled (all bots on one thread — BOT_SHARDS=0)',
+    close: () => registry === undefined ? primary.close() : registry.closeAll(),
+  };
+}
+
+/** `--multi-bot` with bot shards: this thread serves the console and the
+ * account registry; every bot's LINE connection runs in a shard thread. */
+async function startSharded(d: TopologyDeps, shards: number): Promise<Topology> {
+  const { flags, env, logger, users, release } = d;
+  const pool = new ShardPool({
+    shards,
+    logger,
+    init: {
+      sessionsDir: flags.dir,
+      forceDryRun: flags.forceDryRun,
+      showText: flags.showText,
+      release,
+      // The process-wide warm-up budget, split across the shards.
+      warmupConcurrency: Math.max(1, Math.floor(env.connectionWarmupConcurrency / shards)),
+      logLevel: env.logLevel,
+    },
+  });
+  const primary = pool.hostFor(d.bot.botId, flags.config);
+  await primary.start();
+  const registry = new BotRegistry<ShardedBotHost>({
+    ...registryOptions(d),
+    primary,
+    createHost: (botId, configPath) => pool.hostFor(botId, configPath),
+  });
+  restoreOwned(registry, logger);
+  const tenant = createShardedTenantRoutes({ registry, users, logger });
+  return {
+    handler: createCombinedHandler(tenant.admin, tenant.status, { users }),
+    // The console thread has no bot of its own; /api/health and /api/status
+    // are forwarded to the primary's shard by the tenant routes.
+    status: new StatusSource({
+      workerId: 'console',
+      origin: 'sharded',
+      clock: systemClock,
+      metrics: new MetricsRecorder(),
+    }),
+    alerts: undefined,
+    runtime: undefined,
+    isolation: `multi-user bot routing across ${String(pool.size)} bot shard thread(s)`,
+    close: async () => {
+      await registry.closeAll();
+      pool.close();
+    },
+  };
+}
+
+function registryOptions(d: TopologyDeps) {
+  return {
+    users: d.users,
+    logger: d.logger,
+    botsDir: dirname(d.flags.config),
+    templatePath: d.flags.config,
+    primaryOwner: d.flags.primaryOwner,
+    ownedStartConcurrency: d.env.connectionWarmupConcurrency,
+  };
+}
+
+/** Multi-user console mode: restore every owned bot after a VPS restart. */
+function restoreOwned(registry: { startOwned(): Promise<void> }, logger: Logger): void {
+  void registry.startOwned().catch((err: unknown) => {
+    logger.error('starting other users’ bots failed', {
+      reason: err instanceof Error ? err.message : String(err),
+    });
+  });
+}
+
+async function main(): Promise<number> {
+  const flags = parse(Deno.args);
+  const env = loadConfig();
+  // Loaded up front only to fail fast on a broken file and to learn the
+  // primary bot's id; the host re-reads it on every (re)connect.
+  const bot = await loadBotConfig(flags.config);
+  const dryRun = bot.dryRun || flags.forceDryRun;
+  const logger = new Logger({ level: env.logLevel, base: { bot: bot.botId } });
+  startThreadLoopLag(systemClock);
+
+  // Credentials remain per bot. Isolated service instances should use a
+  // separate users file too, so their consoles cannot route to another bot.
+  const users = new UsersStore(flags.usersFile);
+  const release = await describeRelease(env);
+  const deps: TopologyDeps = { flags, env, bot, logger, users, release };
+  const shards = flags.multiBot
+    ? resolveBotShards(env.botShards, navigator.hardwareConcurrency)
+    : 0;
+  const topology = shards > 0 ? await startSharded(deps, shards) : await startInProcess(deps);
   const server = flags.serve
     ? startStatusServer({
       logger,
       port: flags.port,
-      source: primary.status,
-      alerts: primary.alerts,
+      source: topology.status,
+      alerts: topology.alerts,
       release,
-      wrapHandler: () => handler,
+      wrapHandler: () => topology.handler,
     })
     : undefined;
 
@@ -191,7 +294,33 @@ async function main(): Promise<number> {
     }, flags.seconds * 1_000);
   }
 
-  const runtime = primary.runtime;
+  printBanner({ bot, release, runtime: topology.runtime, server, dryRun, topology });
+
+  // Every bot's connection runs in the background inside its own host; this
+  // process only has to stay up until it is asked to stop.
+  await new Promise<void>((resolve) => {
+    controller.signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+
+  // Read before shutdown, which discards the runtime.
+  const worker = topology.runtime?.worker;
+  const stats = worker?.stats;
+  const send = worker?.metrics.snapshot().spans.send;
+  await topology.close();
+  await server?.shutdown();
+  if (stats !== undefined) printSummary(stats, send);
+  return 0;
+}
+
+function printBanner(o: {
+  bot: BotConfig;
+  release: ReleaseManifest;
+  runtime: LineRuntime | undefined;
+  server: RunningStatusServer | undefined;
+  dryRun: boolean;
+  topology: Topology;
+}): void {
+  const { bot, release, runtime, server, dryRun } = o;
   writeLine('');
   writeLine(`bot          : ${bot.botId}  (owner ${bot.ownerId})`);
   writeLine(
@@ -232,51 +361,35 @@ async function main(): Promise<number> {
     );
   }
   writeLine(
-    runtime === undefined
+    runtime === undefined && o.topology.status.snapshot().origin !== 'sharded'
       ? 'status       : NOT CONNECTED to LINE — sign in and open /app to scan a fresh QR'
       : dryRun
       ? 'mode         : DRY RUN — replies are logged, nothing is posted'
       : 'mode         : LIVE — this bot WILL post into real rooms',
   );
-  writeLine(
-    registry === undefined
-      ? 'isolation    : this process owns this bot only'
-      : 'isolation    : multi-user bot routing enabled',
-  );
+  writeLine(`isolation    : ${o.topology.isolation}`);
   writeLine('');
+}
 
-  // Every bot's connection runs in the background inside its own host; this
-  // process only has to stay up until it is asked to stop.
-  await new Promise<void>((resolve) => {
-    controller.signal.addEventListener('abort', () => resolve(), { once: true });
-  });
-
-  // Read before shutdown, which discards the runtime.
-  const worker = primary.runtime?.worker;
-  const stats = worker?.stats;
-  const send = worker?.metrics.snapshot().spans.send;
-  if (registry === undefined) await primary.close();
-  else await registry.closeAll();
-  await server?.shutdown();
-
-  if (stats !== undefined) {
-    writeLine('');
-    writeLine('── worker summary ─────────────────────────────');
-    writeLine(`received   : ${String(stats.received)}`);
-    writeLine(`dispatched : ${String(stats.dispatched)}`);
+function printSummary(
+  stats: { received: number; dispatched: number; suppressed: number; failed: number },
+  send: { min: number; p50: number; p95: number; count: number } | undefined,
+): void {
+  writeLine('');
+  writeLine('── worker summary ─────────────────────────────');
+  writeLine(`received   : ${String(stats.received)}`);
+  writeLine(`dispatched : ${String(stats.dispatched)}`);
+  writeLine(
+    `suppressed : ${String(stats.suppressed)}  (dedupe / no rule / not allowed / rate limit)`,
+  );
+  writeLine(`failed     : ${String(stats.failed)}`);
+  if (send !== undefined) {
     writeLine(
-      `suppressed : ${String(stats.suppressed)}  (dedupe / no rule / not allowed / rate limit)`,
+      `send RTT   : min ${send.min.toFixed(1)} / p50 ${send.p50.toFixed(1)} / p95 ${
+        send.p95.toFixed(1)
+      } ms  (n=${String(send.count)})`,
     );
-    writeLine(`failed     : ${String(stats.failed)}`);
-    if (send !== undefined) {
-      writeLine(
-        `send RTT   : min ${send.min.toFixed(1)} / p50 ${send.p50.toFixed(1)} / p95 ${
-          send.p95.toFixed(1)
-        } ms  (n=${String(send.count)})`,
-      );
-    }
   }
-  return 0;
 }
 
 if (import.meta.main) {

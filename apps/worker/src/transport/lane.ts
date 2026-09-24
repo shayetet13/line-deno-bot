@@ -223,6 +223,12 @@ export class Lane {
     return this.#profiles[measurement].lastRttMs;
   }
 
+  /** How many samples of this kind the current window holds. A ranking made
+   * on one sample is a guess; callers that compare lanes need this. */
+  sampleCountFor(measurement: LaneMeasurement): number {
+    return this.#profiles[measurement].samples.length;
+  }
+
   lastRttAtFor(measurement: LaneMeasurement): number | undefined {
     return this.#profiles[measurement].lastRttAtMono;
   }
