@@ -52,8 +52,11 @@ previous_tag() { cat "$ROOT/previous-tag" 2>/dev/null || true; }
 
 status() {
   printf 'root:     %s\n' "$ROOT"
-  printf 'live:     %s\n' "$(current_tag || echo none)"
-  printf 'previous: %s\n' "$(previous_tag || echo none)"
+  local live prev
+  live="$(current_tag)"
+  prev="$(previous_tag)"
+  printf 'live:     %s\n' "${live:-none}"
+  printf 'previous: %s\n' "${prev:-none}"
   docker ps --filter "name=^${NAME}$" --format 'container: {{.Names}} {{.Status}} {{.Image}}' || true
   curl -s --max-time 5 "http://127.0.0.1:$PORT/api/health" || true
   echo
@@ -69,8 +72,8 @@ rollback() {
   prev="$(previous_tag)"
   [[ -n "$prev" && -d "$ROOT/releases/$prev" ]] || die 'no previous release to roll back to'
   log "rolling back to $prev"
-  switch_to "$prev"
-  healthy || die "previous release $prev is not healthy either — see: docker logs $NAME"
+  switch_to "$prev" && healthy ||
+    die "previous release $prev is not healthy either — see: docker logs $NAME"
   printf '%s\n' "$(current_tag)" >"$ROOT/previous-tag"
   printf '%s\n' "$prev" >"$ROOT/current-tag"
   ln -sfn "$ROOT/releases/$prev" "$ROOT/current"
@@ -157,8 +160,9 @@ docker build --network host -t "$IMAGE:$TAG" \
 
 before="$(current_tag)"
 log "starting $NAME on port $PORT"
-switch_to "$TAG"
-if ! healthy; then
+# `up` itself can fail after the old container is already gone (bad image,
+# refused runtime setting), so its failure must reach the restore below too.
+if ! switch_to "$TAG" || ! healthy; then
   warn "$TAG did not serve /account/login within ${HEALTH_TIMEOUT_S}s"
   docker logs --tail 40 "$NAME" >&2 || true
   if [[ -n "$before" && -d "$ROOT/releases/$before" ]]; then
