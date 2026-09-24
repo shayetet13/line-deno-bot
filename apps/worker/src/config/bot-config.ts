@@ -71,6 +71,12 @@ export interface BotConfig {
    * regardless of `pollIntervalMs`. Costs one extra concurrent request per
    * added width. */
   squarePollRaceWidth: number;
+  /** How many dedicated-poll fetches stay in flight, launched evenly across
+   * one round trip, once the backlog is drained. Shrinks the window in which
+   * a newly posted message is invisible from ~1 RTT to ~RTT / N. 1 (default)
+   * keeps one fetch at a time. Cannot be combined with
+   * `squarePollRaceWidth > 1`. */
+  squarePollStagger: number;
 }
 
 class Problems {
@@ -223,6 +229,14 @@ export function parseBotConfig(raw: unknown, source = '<inline>'): BotConfig {
   if (squarePollRaceWidth > 4) {
     p.add('squarePollRaceWidth: expected an integer between 1 and 4');
   }
+  // Same flood guard: each step is one more request in flight per room.
+  const squarePollStagger = p.int(o['squarePollStagger'], 'squarePollStagger', 1, 1);
+  if (squarePollStagger > 4) {
+    p.add('squarePollStagger: expected an integer between 1 and 4');
+  }
+  if (squarePollStagger > 1 && squarePollRaceWidth > 1) {
+    p.add('squarePollStagger: cannot be combined with squarePollRaceWidth > 1');
+  }
 
   const config: BotConfig = {
     botId,
@@ -251,6 +265,7 @@ export function parseBotConfig(raw: unknown, source = '<inline>'): BotConfig {
     pollIntervalMs: p.int(o['pollIntervalMs'], 'pollIntervalMs', 100, 0),
     pollQuietMs,
     squarePollRaceWidth,
+    squarePollStagger,
   };
 
   if (p.list.length > 0) {

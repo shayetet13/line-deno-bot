@@ -165,6 +165,7 @@ export async function connectToLine(opts: {
       slotBudget: bot.slotBudget,
       pollIntervalMs: bot.pollIntervalMs,
       pollRaceWidth: bot.squarePollRaceWidth,
+      pollStagger: bot.squarePollStagger,
       pollQuiet,
       pushStatus: () => pushClient.pushHealth,
     });

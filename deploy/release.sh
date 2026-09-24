@@ -20,6 +20,7 @@ CURRENT="$APP_ROOT/current"
 PREVIOUS="$APP_ROOT/previous"
 SERVICE="${SERVICE:-lfr-worker}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8791/api/health}"
+CONSOLE_URL="${CONSOLE_URL:-http://127.0.0.1:8791/account/login}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-60}"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 
@@ -77,17 +78,18 @@ health_check() {
       sleep 2
       continue
     fi
-    local body
-    if body="$(curl -fsS --max-time 5 "$HEALTH_URL" 2>/dev/null)"; then
-      # /api/health answers 200 only when readiness is ARMED, so a successful
-      # curl here means every precondition holds, not merely that a port is open.
-      log "healthy: $body"
+    if curl -fsS --max-time 5 "$CONSOLE_URL" >/dev/null 2>&1; then
+      # The public console must remain reachable even before a person scans
+      # their first QR. `/api/health` is intentionally stricter: it is 503
+      # until bot-1 is ARMED, which would incorrectly roll back a perfectly
+      # usable multi-user console awaiting its first LINE session.
+      log "healthy: console reachable"
       return 0
     fi
     sleep 2
   done
 
-  warn "no healthy response from $HEALTH_URL within ${HEALTH_TIMEOUT_S}s"
+  warn "console not reachable at $CONSOLE_URL within ${HEALTH_TIMEOUT_S}s"
   systemctl status "$SERVICE" --no-pager --lines=20 >&2 || true
   return 1
 }

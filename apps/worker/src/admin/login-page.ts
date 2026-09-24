@@ -46,11 +46,8 @@ export const LOGIN_HTML = renderPage({
     </div>
 
     <div id="successBox" hidden>
-      <p class="msg ok">เข้าสู่ระบบสำเร็จ — บันทึก session ใหม่แล้ว ต้อง restart worker เพื่อใช้ session นี้</p>
-      <div class="actions">
-        <button type="button" class="primary" id="restartBtn">Restart worker ตอนนี้</button>
-      </div>
-      <p class="note" id="restartNote"></p>
+      <p class="msg ok">เข้าสู่ระบบสำเร็จ — กำลังเชื่อมบอทด้วย session ใหม่โดยอัตโนมัติ…</p>
+      <p class="note">หน้านี้จะอัปเดตเองเมื่อบอทพร้อมใช้งาน</p>
     </div>
 
     <div id="errorBox" hidden>
@@ -119,13 +116,9 @@ const boxes = ['idleBox', 'runningBox', 'successBox', 'errorBox'];
 // already logged in.
 function showBox(name) { boxes.forEach((b) => { $(b).hidden = b !== name; }); }
 
-// After a restart (QR success, logout, or a room-selection change that
-// changed the talk/square surface) the worker process exits and comes back
-// a few seconds later — supervised locally by start.bat's loop, by systemd
-// in production. Without this, the page just sat on a static "restarting…"
-// note forever, which reads as hung. Polls a cheap endpoint and reloads
-// itself the moment the new process answers; gives up (silently — the note
-// already told them a manual refresh works) after ~30s.
+// A room-surface change can briefly reconnect this bot. The worker keeps
+// serving throughout; poll until its fresh runtime is ready and reload the
+// page once rather than asking the person to refresh manually.
 async function waitForServerThenReload(maxAttempts) {
   for (let i = 0; i < maxAttempts; i += 1) {
     await new Promise((r) => setTimeout(r, 1500));
@@ -166,7 +159,10 @@ function syncBox(body) {
       : '';
     return;
   }
-  if (f.status === 'success') { showBox('successBox'); stopPolling(); return; }
+  // BotHost replaces this completed flow with a fresh, connected one after
+  // the QR session is saved. Keep polling so the page reaches ready by
+  // itself; no process or user-triggered restart is required.
+  if (f.status === 'success') { showBox('successBox'); return; }
   if (f.status === 'error') { $('errorMsg').textContent = f.message; showBox('errorBox'); stopPolling(); }
 }
 
@@ -203,13 +199,6 @@ $('logoutBtn').addEventListener('click', async () => {
 $('retryBtn').addEventListener('click', async () => {
   await fetch('/api/login/reset', { method: 'POST' });
   showBox('idleBox');
-});
-
-$('restartBtn').addEventListener('click', async () => {
-  $('restartBtn').disabled = true;
-  $('restartNote').textContent = 'กำลัง restart… หน้านี้จะรีโหลดให้อัตโนมัติ';
-  await fetch('/api/admin/restart', { method: 'POST' }).catch(() => {});
-  waitForServerThenReload(20);
 });
 
 loadSessionInfo().then((body) => {

@@ -20,7 +20,6 @@
     "bench": "deno run -A apps/worker/src/cli/bench.ts",
     "serve": "deno run -A apps/worker/src/cli/serve.ts",
     "acceptance": "deno run -A apps/worker/src/cli/acceptance.ts",
-    "provision-bot": "deno run -A apps/worker/src/cli/provision-bot.ts",
     "test": "deno test -A --coverage=coverage apps/worker/test",
     "check": "deno check apps/worker packages/contracts",
     "lint": "deno lint apps packages",

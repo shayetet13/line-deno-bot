@@ -1,5 +1,5 @@
 [Unit]
-Description=line-first-response worker
+Description=line-first-response multi-user bot control service
 Documentation=file:///opt/line-first-response/current/docs/runbook.md
 After=network-online.target chronyd.service
 Wants=network-online.target
@@ -16,7 +16,10 @@ Type=simple
 WorkingDirectory=/opt/line-first-response/current
 Environment=PATH=/root/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=-/opt/line-first-response/.env
-ExecStart=/root/.deno/bin/deno task serve --config /opt/line-first-response/config/bots/bot-1.json --port 8791
+# One public console owns the human-account registry and routes every signed-in
+# person to their own BotHost. BotHost sessions/configs remain namespaced by
+# bot id; --multi-bot is required here and must not be omitted.
+ExecStart=/root/.deno/bin/deno task serve --config /opt/line-first-response/config/bots/bot-1.json --sessions-dir /opt/line-first-response/.sessions --users-file /opt/line-first-response/.control/users.json --multi-bot --port 8791
 
 Restart=always
 RestartSec=5

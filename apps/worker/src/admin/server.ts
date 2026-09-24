@@ -449,7 +449,13 @@ function isAdminOnlyPath(pathname: string): boolean {
   if (pathname === '/users' || pathname === '/api/users' || pathname.startsWith('/api/users/')) {
     return true;
   }
-  return pathname === '/api/status' || pathname === '/api/alerts';
+  // /api/status stays open to a `user` account too: `status` above always
+  // resolves it to the signed-in person's OWN bot (`registry.hostFor(ctx.user)`
+  // in the multi-user router, the single bot otherwise), so there is no
+  // cross-tenant data to protect — and it is what `/app`'s live speed panel
+  // reads. /api/alerts is a separate, admin-only concern (paging/alerting
+  // config), so it stays gated.
+  return pathname === '/api/alerts';
 }
 
 const PUBLIC_PATHS = new Set(['/account/login', '/api/account/login']);

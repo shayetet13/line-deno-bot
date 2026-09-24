@@ -64,11 +64,7 @@ export const DEFAULT_THRESHOLDS: AlertThresholds = {
   missedEventRate: 0.2,
   racedSources: 1,
   regressionFactor: 1.5,
-  // 2026-09-21: raised from 30 — real production p95 on Tokyo 3 sits ~42ms
-  // (LINE-side processing, confirmed non-reducible; see dashboard.ts BUDGET
-  // comment and docs/experiments.md `native-encode-relay`). 46 gives headroom
-  // above the observed floor instead of alerting on expected behavior.
-  lineTriggerReplyP95Ms: 46,
+  lineTriggerReplyP95Ms: 30,
   failureRate: 0.05,
   minDurationMs: 60_000,
   minSamples: 20,

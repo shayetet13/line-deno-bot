@@ -132,6 +132,16 @@ describe('parseBotConfig', () => {
     expect(errorsOf(minimal({ squarePollRaceWidth: 50 })).join()).toContain('squarePollRaceWidth');
   });
 
+  test('squarePollStagger defaults to 1, is capped, and excludes squarePollRaceWidth', () => {
+    expect(parse({}).squarePollStagger).toBe(1);
+    expect(parse({ squarePollStagger: 3 }).squarePollStagger).toBe(3);
+    expect(errorsOf(minimal({ squarePollStagger: 0 })).join()).toContain('squarePollStagger');
+    expect(errorsOf(minimal({ squarePollStagger: 5 })).join()).toContain('squarePollStagger');
+    expect(errorsOf(minimal({ squarePollStagger: 2, squarePollRaceWidth: 2 })).join()).toContain(
+      'squarePollStagger',
+    );
+  });
+
   test('reserves one send lane by default and validates the poll fallback', () => {
     expect(parse({ lanes: 6 }).sendReservedLanes).toBe(1);
     expect(parse({ lanes: 6, sendReservedLanes: 2 }).sendReservedLanes).toBe(2);

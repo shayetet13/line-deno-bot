@@ -48,6 +48,11 @@ export const APP_HTML = renderPage({
       .actions{flex-wrap:wrap}
       .actions button{flex:1 1 auto;min-width:8rem}
     }
+
+    .speed-log{background:#111820;color:#d9e7ef;border-radius:8px;padding:.85rem 1rem;
+      font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;
+      overflow:auto;min-height:7.2rem}
+    .speed-log.good{color:#72e6a4}.speed-log.warn{color:#ffd166}.speed-log.bad{color:#ff7b86}
   </style>
 
   <section>
@@ -68,11 +73,8 @@ export const APP_HTML = renderPage({
     </div>
 
     <div id="successBox" hidden>
-      <p class="msg ok">เชื่อมต่อสำเร็จ — บันทึก session ใหม่แล้ว ต้อง restart เพื่อใช้ session นี้</p>
-      <div class="actions">
-        <button type="button" class="primary" id="restartBtn">Restart ตอนนี้</button>
-      </div>
-      <p class="note" id="restartNote"></p>
+      <p class="msg ok">สแกนสำเร็จ — กำลังเชื่อมบอทด้วย session ใหม่โดยอัตโนมัติ…</p>
+      <p class="note">หน้านี้จะอัปเดตเองเมื่อบอทพร้อมใช้งาน</p>
     </div>
 
     <div id="errorBox" hidden>
@@ -89,6 +91,12 @@ export const APP_HTML = renderPage({
   <p class="note msg" id="notConnectedNotice" hidden>
     ยังไม่เชื่อมต่อ LINE — สแกน QR ด้านบนก่อน เพื่อดูและตั้งค่าห้อง/กฎ
   </p>
+
+  <section>
+    <h2>สถานะความเร็ว (live log)</h2>
+    <p class="note">ค่าหลักที่ใช้ตัดสินว่าชนะคือ <b>LINE TRIGGER→REPLY</b> ต้องไม่เกิน 30ms ใน p95 · RPC คือเวลาส่งจริง · INBOUND คือเวลาจาก LINE ถึงเรา</p>
+    <pre id="speedLog" class="speed-log">กำลังอ่าน metrics…</pre>
+  </section>
 
   <div id="managePanel">
     <section>
@@ -140,6 +148,43 @@ export const APP_HTML = renderPage({
   script: `
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const speedMs = (v) => v === undefined || v === null ? '—' : v.toFixed(1) + 'ms';
+const speedState = (v, budget) => v === undefined || v === null ? 'WAIT' : v <= budget ? 'OK' : 'SLOW';
+function renderSpeedLog(status) {
+  const metrics = status?.metrics ?? {};
+  const spans = metrics.spans ?? {};
+  const cross = metrics.crossHost ?? {};
+  const row = (label, sample, budget) => {
+    const value = sample?.p95;
+    return label.padEnd(24) + ' p50=' + speedMs(sample?.p50).padStart(8) +
+      ' p95=' + speedMs(value).padStart(8) + ' last=' + speedMs(sample?.last).padStart(8) +
+      ' n=' + String(sample?.count ?? 0).padStart(4) + ' [' + speedState(value, budget) + ']';
+  };
+  const lines = [
+    'LIVE SPEED STATUS  ' + new Date(status?.generatedAtMs ?? Date.now()).toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok' }),
+    'TARGET: LINE TRIGGER-REPLY p95 <= 30.0ms',
+    row('LINE TRIGGER-REPLY', cross.line_round_trip, 30),
+    row('RPC (send ACK)', spans.send, 19),
+    row('INBOUND (LINE->เรา)', cross.inbound, 11),
+    'calls=' + String(metrics.counters?.line_calls ?? 0) + '  worker=' + String(status?.workerId ?? '—'),
+  ];
+  const el = $('speedLog');
+  el.textContent = lines.join('\\n');
+  const samples = [cross.line_round_trip, spans.send, cross.inbound];
+  el.className = 'speed-log ' + (samples.some((s) => s?.p95 !== undefined && s.p95 > 30) ? 'bad' : '');
+}
+
+async function loadSpeedStatus() {
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error('status ' + res.status);
+    renderSpeedLog(await res.json());
+  } catch {
+    $('speedLog').textContent = 'LIVE SPEED STATUS  unavailable\\nยังอ่าน metrics จาก worker ไม่ได้';
+    $('speedLog').className = 'speed-log warn';
+  }
+}
 
 function flash(el, text, ok) {
   el.textContent = text;
@@ -206,13 +251,9 @@ const loginBoxes = ['idleBox', 'runningBox', 'successBox', 'errorBox'];
 // logged in.
 function showLoginBox(name) { loginBoxes.forEach((b) => { $(b).hidden = b !== name; }); }
 
-// After a restart (QR success, logout, or a room-selection change that
-// changed the talk/square surface) the worker process exits and comes back
-// a few seconds later — supervised locally by start.bat's loop, by systemd
-// in production. Without this, the page just sat on a static "restarting…"
-// note forever, which reads as hung. Polls a cheap endpoint and reloads
-// itself the moment the new process answers; gives up (silently — the note
-// already told them a manual refresh works) after ~30s.
+// A room-surface change can briefly reconnect this bot. The worker keeps
+// serving throughout; poll until its fresh runtime is ready and reload the
+// page once rather than asking the person to refresh manually.
 async function waitForServerThenReload(maxAttempts) {
   for (let i = 0; i < maxAttempts; i += 1) {
     await new Promise((r) => setTimeout(r, 1500));
@@ -253,7 +294,10 @@ function syncLoginBox(body) {
       : '';
     return;
   }
-  if (f.status === 'success') { showLoginBox('successBox'); stopLoginPolling(); return; }
+  // BotHost replaces this completed flow with a fresh, connected one after
+  // the QR session is saved. Keep polling so the page reaches ready by
+  // itself; no process or user-triggered restart is required.
+  if (f.status === 'success') { showLoginBox('successBox'); return; }
   if (f.status === 'error') { $('errorMsg').textContent = f.message; showLoginBox('errorBox'); stopLoginPolling(); }
 }
 
@@ -290,13 +334,6 @@ $('logoutBtn').addEventListener('click', async () => {
 $('retryBtn').addEventListener('click', async () => {
   await fetch('/api/login/reset', { method: 'POST' });
   showLoginBox('idleBox');
-});
-
-$('restartBtn').addEventListener('click', async () => {
-  $('restartBtn').disabled = true;
-  $('restartNote').textContent = 'กำลัง restart… หน้านี้จะรีโหลดให้อัตโนมัติ';
-  await fetch('/api/admin/restart', { method: 'POST' }).catch(() => {});
-  waitForServerThenReload(20);
 });
 
 loadSessionInfo().then((body) => {
@@ -455,5 +492,7 @@ $('form').addEventListener('submit', async (e) => {
 });
 
 loadGroups();
-loadRules();`,
+loadRules();
+loadSpeedStatus();
+setInterval(loadSpeedStatus, 1000);`,
 });

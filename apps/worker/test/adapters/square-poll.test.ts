@@ -1,7 +1,7 @@
 import { describe, it as test } from '@std/testing/bdd';
 import { expect } from '@std/expect';
 import { unsafeBotId, unsafeOwnerId } from '@line-first/contracts';
-import { FakeClock } from '../../src/lib/clock.ts';
+import { FakeClock, systemClock } from '../../src/lib/clock.ts';
 import { type LogFields, Logger } from '../../src/logging/logger.ts';
 import type { RawLineMessage } from '../../src/adapters/linejs/normalize.ts';
 import { type SquareEventPage, SquarePollAdapter } from '../../src/adapters/linejs/square-poll.ts';
@@ -343,6 +343,180 @@ describe('SquarePollAdapter — pollRaceWidth', () => {
       // Both racers must have settled before backoff retried — never more
       // than `pollRaceWidth` requests in flight across the retry boundary.
       expect(fetcher.maxConcurrent).toBe(2);
+    } finally {
+      await adapter.stop();
+    }
+  });
+});
+
+/** Fetcher for `pollStagger` tests: call `i` resolves after `script(i).delayMs`
+ * with `script(i).page`. Real timers and a real clock, because stagger
+ * spacing is derived from measured fetch durations. */
+class StaggerFetcher {
+  readonly calledWith: (string | undefined)[] = [];
+  readonly startedAtMs: number[] = [];
+  #concurrent = 0;
+  maxConcurrent = 0;
+  constructor(
+    private readonly script: (
+      call: number,
+      syncToken: string | undefined,
+    ) => { delayMs: number; page: SquareEventPage },
+  ) {}
+  readonly fn = async (
+    syncToken: string | undefined,
+    _signal: AbortSignal,
+  ): Promise<SquareEventPage> => {
+    const call = this.calledWith.length;
+    this.calledWith.push(syncToken);
+    this.startedAtMs.push(performance.now());
+    this.#concurrent += 1;
+    this.maxConcurrent = Math.max(this.maxConcurrent, this.#concurrent);
+    const { delayMs, page } = this.script(call, syncToken);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return page;
+    } finally {
+      this.#concurrent -= 1;
+    }
+  };
+}
+
+const staggered = (fetcher: StaggerFetcher, pollStagger: number): SquarePollAdapter =>
+  new SquarePollAdapter({
+    fetcher: fetcher.fn,
+    botId: unsafeBotId('bot-1'),
+    ownerId: unsafeOwnerId('owner-1'),
+    clock: systemClock,
+    logger: silent(),
+    intervalMs: 0,
+    fetchTimeoutMs: 1_000,
+    pollStagger,
+  });
+
+const waitFor = async (done: () => boolean, label: string): Promise<void> => {
+  const deadline = Date.now() + 1_000;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, 2));
+  }
+};
+
+describe('SquarePollAdapter — pollStagger', () => {
+  test('keeps N fetches in flight, launched apart rather than together', async () => {
+    const fetcher = new StaggerFetcher((_call, token) => ({
+      delayMs: 20,
+      page: { messages: [], syncToken: token ?? 'drained' },
+    }));
+    const adapter = staggered(fetcher, 2);
+    try {
+      adapter.start(new AbortController().signal);
+      await waitFor(() => fetcher.calledWith.length >= 8, 'live fetches');
+      expect(fetcher.maxConcurrent).toBe(2);
+      // Call 0 drains alone; live calls start ~RTT/2 (~10ms) apart. A
+      // simultaneous launch (the pollRaceWidth shape) would show ~0ms gaps.
+      const gaps = fetcher.startedAtMs.slice(2, 8).map((t, i) =>
+        t - (fetcher.startedAtMs[i + 1] ?? t)
+      );
+      for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(4);
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  test('emits a message seen by two overlapping fetches exactly once', async () => {
+    const fetcher = new StaggerFetcher((call) => ({
+      delayMs: call === 0 ? 1 : 15,
+      page: call === 0
+        ? { messages: [], syncToken: 'drained' }
+        : { messages: [msg('dup-1')], syncToken: 'drained' },
+    }));
+    const adapter = staggered(fetcher, 2);
+    const seen: string[] = [];
+    adapter.setSynchronousSink((event) => seen.push(event.messageId));
+    try {
+      adapter.start(new AbortController().signal);
+      await waitFor(() => fetcher.calledWith.length >= 6, 'overlapping fetches');
+      expect(seen).toEqual(['dup-1']);
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  test('keeps the cursor of the latest-started fetch, even when it returns first', async () => {
+    const fetcher = new StaggerFetcher((call, token) => {
+      if (call === 0) return { delayMs: 10, page: { messages: [], syncToken: 'drained' } };
+      // Call 1 starts first but answers last, describing an older moment.
+      if (call === 1) return { delayMs: 60, page: { messages: [], syncToken: 'older' } };
+      if (call === 2) return { delayMs: 5, page: { messages: [], syncToken: 'newer' } };
+      return { delayMs: 10, page: { messages: [], syncToken: token } };
+    });
+    const adapter = staggered(fetcher, 2);
+    try {
+      adapter.start(new AbortController().signal);
+      // Wait until well after call 1 (the slow, older one) has returned.
+      await waitFor(
+        () => performance.now() - (fetcher.startedAtMs[1] ?? performance.now()) > 90,
+        'the stale response',
+      );
+      const later = fetcher.calledWith.slice(3);
+      expect(later.length).toBeGreaterThan(0);
+      expect(later).not.toContain('older');
+      expect(later.every((token) => token === 'newer')).toBe(true);
+    } finally {
+      await adapter.stop();
+    }
+  });
+
+  test('refuses to combine with pollRaceWidth', () => {
+    expect(() =>
+      new SquarePollAdapter({
+        fetcher: () => Promise.resolve({ messages: [], syncToken: undefined }),
+        botId: unsafeBotId('bot-1'),
+        ownerId: unsafeOwnerId('owner-1'),
+        clock: systemClock,
+        logger: silent(),
+        pollStagger: 2,
+        pollRaceWidth: 2,
+      })
+    ).toThrow('pollStagger');
+  });
+});
+
+describe('SquarePollAdapter — poll hit diagnostics', () => {
+  test('splits inbound into wait, fetch and fetches LINE answered without it', async () => {
+    const logs: LogFields[] = [];
+    const created = Date.now() + 30;
+    const withCreated = (id: string): RawLineMessage => ({
+      ...msg(id),
+      raw: { message: { id, createdTime: created } },
+    });
+    const fetcher = new StaggerFetcher((call, token) => ({
+      delayMs: 10,
+      // Every fetch sent after `created` stays empty until call 8.
+      page: call >= 8
+        ? { messages: [withCreated('late-1')], syncToken: 'drained' }
+        : { messages: [], syncToken: token ?? 'drained' },
+    }));
+    const adapter = new SquarePollAdapter({
+      fetcher: fetcher.fn,
+      botId: unsafeBotId('bot-1'),
+      ownerId: unsafeOwnerId('owner-1'),
+      clock: systemClock,
+      logger: new Logger({ level: 'info', sink: (entry) => logs.push(entry) }),
+      intervalMs: 0,
+      fetchTimeoutMs: 1_000,
+      pollStagger: 2,
+    });
+    try {
+      adapter.start(new AbortController().signal);
+      await waitFor(() => logs.some((l) => l['msg'] === 'poll hit'), 'poll hit log');
+      const hit = logs.find((l) => l['msg'] === 'poll hit');
+      expect(hit?.['messageId']).toBe('late-1');
+      expect(hit?.['stagger']).toBe(2);
+      expect(hit?.['fetchMs'] as number).toBeGreaterThanOrEqual(5);
+      expect(hit?.['inboundMs'] as number).toBeGreaterThanOrEqual(hit?.['fetchMs'] as number);
+      expect(hit?.['missed'] as number).toBeGreaterThan(0);
     } finally {
       await adapter.stop();
     }

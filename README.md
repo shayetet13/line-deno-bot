@@ -94,9 +94,10 @@ deno task probe --bot-id bot-1 --no-talk         # ฟังเฉพาะ Open
 สองส่วนนี้ไม่ใช้ credential ร่วมกัน และการ login ของ bot หนึ่งตัวไม่ทำให้ user หรือ bot ตัวอื่น login ตาม
 `.gitignore` กันไฟล์ credential ไว้แล้ว ห้าม commit / ห้าม log
 
-**การแยก bot:** `deno task serve --config …` ทำงานเฉพาะ bot ใน config นั้นโดยค่าเริ่มต้น และไม่สร้าง/เปิด bot
-อื่น. Production ใช้ `lfr-worker@<bot-id>.service` หนึ่ง unit ต่อ bot; session, config, console account
-และ restart แยกกันหมด. `--multi-bot` มีไว้รองรับระบบเก่าเท่านั้นและห้ามใช้กับ worker ที่แข่ง latency.
+**การแยก bot บน VPS:** public console รันด้วย `--multi-bot` และใช้บัญชีคนร่วมกันที่ `.control/users.json`
+แต่ทุก user ถูกผูกกับ `botId` ของตัวเองตั้งแต่ครั้งแรกที่เข้าใช้. LINE session, LINEJS storage, กฎ และห้อง จึงแยกตาม
+botId โดยเด็ดขาด. หลังสแกน QR ระบบ reconnect เฉพาะ bot นั้นใน process เดิม อัตโนมัติ; ไม่ restart service
+และไม่กระทบคนอื่น.
 
 ## สถานะปัจจุบัน
 

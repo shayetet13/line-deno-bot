@@ -276,7 +276,7 @@ describe('LanePool — routing', () => {
     await Promise.all([first, second]);
   });
 
-  test('caps stuck poll streams instead of growing an unbounded receive queue', async () => {
+  test('keeps a saturated poll from crashing the worker or borrowing a reply lane', async () => {
     const clock = new FakeClock();
     const pending: Array<ReturnType<typeof Promise.withResolvers<Response>>> = [];
     const pool = new LanePool({
@@ -297,11 +297,13 @@ describe('LanePool — routing', () => {
 
     const first = pool.fetch(roleReq('poll'));
     const second = pool.fetch(roleReq('poll'));
-    await expect(pool.fetch(roleReq('poll'))).rejects.toThrow(/all receive lanes are busy/);
-    expect(pool.stats.map((lane) => lane.inFlight)).toEqual([0, 1, 1]);
+    const third = pool.fetch(roleReq('poll'));
+    expect(pool.stats[0]?.inFlight).toBe(0);
+    expect(pool.stats.slice(1).reduce((total, lane) => total + lane.inFlight, 0)).toBe(3);
+    expect(pool.stats.slice(1).every((lane) => lane.inFlight <= 2)).toBe(true);
 
     pending.forEach(({ resolve }) => resolve(new Response()));
-    await Promise.all([first, second]);
+    await Promise.all([first, second, third]);
   });
 
   test('sets HTTP priority while consuming the private lane hint in place', async () => {

@@ -56,9 +56,10 @@ export interface LanePoolOptions {
   /** Open a fresh physical route per lane past this age (Playbook §7.11). */
   maxAgeMs?: number;
   recycleGapMs?: number;
-  /** A receive loop must have at most this many active RPCs on one route.
-   * Once full, the caller backs off instead of manufacturing an unbounded
-   * queue that later steals HTTP/2 capacity from the next reply. */
+  /** Preferred ceiling for active receive RPCs on one route.  Reaching it
+   * makes the picker spread work to another receive lane first; if every
+   * receive lane is full, one is reused as an HTTP/2 multiplexing fallback.
+   * Reply lanes remain excluded from that fallback. */
   maxPollInFlightPerLane?: number;
 }
 
@@ -410,14 +411,19 @@ export class LanePool {
       }
       return forced;
     }
-    // Receiving has an intentional backoff path; replying does not. A stuck
-    // poll must therefore stop at a small, visible ceiling rather than create
-    // dozens of multiplexed streams that raise the next reply's tail latency.
-    const bounded = role === 'send'
+    // Prefer an uncontended receive lane.  This is deliberately a soft cap:
+    // LINEJS can issue a background fetch outside the dedicated poll loop, and
+    // rejecting that fetch when every receive lane has one stream made the
+    // rejection uncaught and restarted the whole worker.  HTTP/2 supports a
+    // small overflow stream; use the least-loaded receive lane as a last
+    // resort, while preserving the reply-lane reservation.
+    const underCap = role === 'send'
       ? pool
       : pool.filter((lane) => lane.inFlight < this.#opts.maxPollInFlightPerLane);
-    if (bounded.length === 0) {
-      throw new TransientTransportError('lane pool: all receive lanes are busy', {
+    const saturated = role !== 'send' && underCap.length === 0;
+    const bounded = saturated ? pool : underCap;
+    if (saturated) {
+      this.#logger.warn('receive lanes saturated; multiplexing least-loaded lane', {
         role,
         lanes: pool.length,
         maxPollInFlightPerLane: this.#opts.maxPollInFlightPerLane,

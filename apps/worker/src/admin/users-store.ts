@@ -4,10 +4,9 @@ import { hashPassword } from './passwords.ts';
 
 /**
  * Human login accounts stored in the JSON file supplied to this store. The
- * normal isolated deployment gives every bot its own file under
- * `.control/bot-users/<botId>.json`; its console accounts are therefore
- * independent from its LINE session and from every other bot. Legacy
- * `--multi-bot` mode may deliberately pass a shared file instead.
+ * The VPS multi-user deployment uses one shared account file. `botId` maps
+ * every signed-in person to a different BotHost, so their LINE session,
+ * rules and rooms remain separate while authentication stays at one URL.
  *
  * This store never holds a LINE credential. Those remain exclusively in
  * `session/store.ts` under `<sessions-dir>/<botId>.json` and LINEJS's
@@ -22,8 +21,8 @@ export interface UserRecord {
   passwordHash: string;
   role: UserRole;
   displayName: string | undefined;
-  /** Used only by legacy shared-process `bots/bot-registry.ts` mode to map a
-   * person to their bot. Isolated workers do not need this field. */
+  /** Maps a person to the BotHost that exclusively owns their LINE session,
+   * rules and rooms. */
   botId?: string | undefined;
   createdAt: number;
   updatedAt: number;

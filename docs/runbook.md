@@ -7,68 +7,42 @@
 > ไม่ใช่ cache. ห้าม commit ห้าม log ห้ามใส่ credential ลงใน release directory (`release.sh` symlink
 > เข้ามา)
 >
-> **ห้ามรัน worker ที่ local กับที่ server พร้อมกันด้วยบัญชีเดียวกัน** — LINE อาจตัด session ทิ้ง (Playbook §9.2)
+> ระบบใช้งานบน VPS เท่านั้น: ห้ามนำไฟล์ session ไปเปิดด้วย worker เครื่องอื่น เพราะ LINE อาจตัด session ทิ้ง
+> (Playbook §9.2)
 
 ---
 
 ## 1. ดูสถานะระบบ
 
-Worker แต่ละตัว bind loopback port ของตัวเองเท่านั้น (Playbook §14.3: shard port ห้ามออก public). `bot-1`
-ใช้ 8791 ได้ แต่ bot อื่นต้องมี port คนละหมายเลขใน `.control/instances/<bot-id>.env`. มีสองชั้น login:
+VPS เปิด public console หนึ่ง URL ผ่าน nginx (`0.0.0.0:80 → 127.0.0.1:8791`) และ worker bind loopback
+เท่านั้น. มีสองชั้น login:
 
 1. **ผู้ใช้งานระบบ** — เข้า `/account/login` ด้วยบัญชีของคน เพื่อยืนยันตัวตนและสิทธิ์
 2. **LINE bot** — เข้า `/login` หรือ `/app` หลังจาก user login แล้ว เพื่อเชื่อม LINE account ของ bot ตัวนั้น
 
 การ login ของคนไม่สร้างหรือเปลี่ยน LINE session และการ login ของ bot ไม่สร้างหรือเปลี่ยน web account
 
-**1 bot = 1 worker process** แต่ละ instance มี LINE account, ไฟล์กฎ, รายการห้อง, QR login, event loop
-และ console account ของตัวเอง. จึงไม่มี reconnect, GC หรือ log burst ของ bot หนึ่งตัวมาทำให้ bot อื่นช้า. ห้ามใช้
-`--multi-bot` กับ worker ที่แข่ง latency.
+`lfr-worker.service` ต้องรัน `--multi-bot` เสมอ. เมื่อ admin สร้าง user แล้ว user นั้นเข้าเว็บครั้งแรก ระบบจะ
+สร้าง `botId`/config ของคนนั้นและผูกไว้ถาวร. ทุก route หลัง login resolve ผ่าน user นี้ จึงไม่สามารถอ่านหรือแก้
+LINE session, กฎ, ห้อง หรือ QR ของ user คนอื่นได้.
 
-- สร้าง bot ก่อนเริ่ม service เสมอ: ใช้ `deno task provision-bot --name <slug>` สำหรับ local หรือสร้าง
-  `config/bots/<bot-id>.json` แล้วใช้ `enable-bot-instance.sh` สำหรับ production. การเพิ่ม user ใน
-  console ของ bot หนึ่ง **ไม่** สร้างหรือให้สิทธิ์เข้าถึง bot อื่น
-- ปุ่ม restart / logout / QR ของคนหนึ่ง reconnect เฉพาะ bot ของคนนั้น ไม่ exit ทั้ง process และไม่กระทบคนอื่น
-- ลบผู้ใช้ปิดเฉพาะ console account ของ worker นั้น; config และ LINE session ไม่ถูกลบอัตโนมัติ
-- `/api/health` และ deploy health check ตรวจทุก `lfr-worker@*.service` ที่ active
-- แต่ละ bot เปิด lane/connection ไปหา LINE ของตัวเอง (`lanes` ตาม template) — ผู้ใช้เยอะ = connection เยอะ
-  ดู CPU/FD ก่อนเพิ่มคน
+- admin คนแรกเป็นเจ้าของ `bot-1` เดิม เพื่อรักษา session ที่มีอยู่
+- user คนถัดไปได้ bot ใหม่ของตนเอง; ห้ามใช้ username เดียวกันร่วมกัน เพราะเป็นเจ้าของ bot เดียวกันโดยเจตนา
+- QR scan, logout และ recovery reconnect เฉพาะ BotHost นั้นโดยอัตโนมัติ ไม่ restart service
+- ลบ user ปิด BotHost ของคนนั้น แต่ไม่ลบ config หรือ LINE session อัตโนมัติ
 
-`--multi-bot` และ `--primary-owner` เป็น compatibility mode สำหรับ shared process เก่าเท่านั้น; ไม่ใช้ใน
-`lfr-worker@<bot-id>.service` และไม่ควรใช้กับงานที่แข่ง latency.
-
-หลังจากนั้นมีสองทางเข้า:
-
-### ทางที่ 1 — public ผ่าน nginx (มี password)
+### Public ผ่าน nginx
 
 `deploy/nginx-dashboard.conf` ตั้ง nginx เป็น reverse proxy ตัวเดียวที่เผชิญอินเทอร์เน็ต —
-`0.0.0.0:80 → 127.0.0.1:8791` พร้อม HTTP Basic Auth (`/etc/nginx/.htpasswd`) worker เองไม่รู้เรื่องนี้ เลย
-ยัง bind loopback เหมือนเดิม
+`0.0.0.0:80 → 127.0.0.1:8791`. การยืนยันตัวตนทำใน worker ที่ `/account/login`; ไม่มี nginx Basic Auth
 
 ```
-http://<host-ip>/          -- ต้อง login (username/password ดูใน memory หรือถามคนตั้ง)
+http://<host-ip>/account/login
 ```
 
 **ข้อจำกัดที่ต้องรู้:** เป็น **HTTP ธรรมดา ไม่มี TLS** เพราะมีแค่ IP ไม่มีโดเมน — username/password วิ่งเป็น
 cleartext บนสาย ถ้ามีโดเมนแล้วค่อยเพิ่ม TLS (certbot) ทีหลัง ตอนนี้ถือว่า "กันคนเดินผ่านเห็น" ไม่ใช่ "กัน attacker ที่ดัก
 traffic ได้"
-
-เปลี่ยนรหัสผ่าน: `htpasswd /etc/nginx/.htpasswd lfr` บน server แล้ว `systemctl reload nginx`
-
-### ทางที่ 2 — SSH tunnel (ไม่ต้องพึ่ง nginx)
-
-```bash
-ssh -L 8791:127.0.0.1:8791 root@<host>
-# แล้วเปิด http://localhost:8791/
-```
-
-บนเครื่อง Windows: ดับเบิลคลิก `start.bat` แล้วเลือกข้อ 1 (ต่อ tunnel + เปิดเบราว์เซอร์ให้)
-
-> `start.bat` เป็น shim ASCII ล้วนที่เรียก `start.ps1` — **ห้ามใส่ข้อความที่ไม่ใช่ ASCII ลงใน .bat** cmd.exe
-> parse ไฟล์ .bat ตาม byte offset พอเจอ UTF-8 หลายไบต์ (ภาษาไทย) parser จะหลุด แล้วไปรัน เศษกลางบรรทัดแทน
-> UI ทั้งหมดจึงอยู่ใน `.ps1` ซึ่งต้องมี UTF-8 BOM ด้วย ไม่งั้น PowerShell 5.1 จะอ่านเป็น ANSI
->
-> ค่า host/port/รหัสผ่านอยู่ใน `start.local.ps1` (gitignored)
 
 | endpoint      | ใช้ตอนไหน                                                           |
 | ------------- | ------------------------------------------------------------------ |
@@ -77,34 +51,31 @@ ssh -L 8791:127.0.0.1:8791 root@<host>
 | `/api/status` | snapshot ดิบทั้งก้อน + release manifest                                |
 | `/api/alerts` | alert ที่กำลัง firing + ที่กำลังนับเวลาอยู่ (`pending`)                     |
 
-`/api/health` เป็น 200 ก็ต่อเมื่อ readiness = ARMED ครบทั้ง 5 เงื่อนไข (session, receiver, rules, sender,
-backlog) — process ขึ้นแต่ยังไม่ ARMED **ไม่นับว่า deploy สำเร็จ**
+`/api/health` เป็น 200 ก็ต่อเมื่อ bot หลัก ARMED ครบทั้ง 5 เงื่อนไข (session, receiver, rules, sender,
+backlog). deploy ตรวจ `/account/login` ว่า public console เปิดอยู่แทน เพื่อให้ VPS ใหม่ที่รอสแกน QR ครั้งแรก
+deploy ได้สำเร็จ.
 
 ---
 
-## 2. รัน worker แยก instance
+## 2. รัน VPS multi-user service
 
 ```bash
-# ย้ายจาก legacy service ครั้งเดียว (ห้ามให้สอง service ใช้ LINE session เดียวกัน)
-systemctl stop --now lfr-worker.service
-
-# สร้าง/เริ่มหนึ่ง service ต่อ bot; port ต้องไม่ซ้ำกัน
-bash deploy/enable-bot-instance.sh bot-1 8791
-bash deploy/enable-bot-instance.sh shop-b 8792
-
-systemctl restart lfr-worker@bot-1.service
-journalctl -u lfr-worker@bot-1.service -f -o cat
+# หลังติดตั้ง/อัปเดต unit file
+install -m 0644 deploy/lfr-worker.service /etc/systemd/system/lfr-worker.service
+systemctl daemon-reload
+systemctl enable --now lfr-worker.service
+journalctl -u lfr-worker.service -f -o cat
 ```
 
-`enable-bot-instance.sh` เก็บ port ไว้ที่ `.control/instances/<bot-id>.env`, เก็บ console users แยกที่
-`.control/bot-users/<bot-id>.json` และใช้ session ของ bot นั้นเท่านั้น. หลัง deploy, `release.sh` restart
-และ health-check ทุก template instance ที่ active.
+service เดียวใช้ `.control/users.json` เป็นทะเบียนคน และ `.sessions/<botId>.json` เป็น credential ของ
+LINE แยกตาม bot. อย่าเปิด `lfr-worker@*.service` ควบคู่ เพราะมันใช้ topology คนละแบบกับ public multi-user
+console.
 
 รันมือเพื่อ debug:
 
 ```bash
 cd /opt/line-first-response
-deno task serve --config config/bots/bot-1.json --port 8791
+deno task serve --config config/bots/bot-1.json --sessions-dir .sessions --users-file .control/users.json --multi-bot --port 8791
 deno task serve --help
 ```
 
@@ -119,8 +90,8 @@ deno task serve --help
 
 ไม่มี key = dry run โดยตั้งใจ บอทที่โพสต์เพราะคนลืม flag แย่กว่าบอทที่เงียบ
 
-สลับโหมด: แก้ไฟล์แล้ว `systemctl restart lfr-worker` (หรือใช้ `start.bat` เมนูข้อ 3 — โหมด LIVE ต้องพิมพ์
-`LIVE` ยืนยันอีกชั้น) ยืนยันจาก log บรรทัด `mode :` ตอนเริ่ม และจาก `"dryRun"` ใน log `worker armed`
+สลับโหมด: แก้ไฟล์ config ของ bot นั้น แล้ว `systemctl restart lfr-worker`. ยืนยันจาก log บรรทัด `mode :`
+ตอนเริ่ม และจาก `"dryRun"` ใน log `worker armed`
 
 ### แก้กฎ / ห้อง / allowlist
 
@@ -207,7 +178,7 @@ alert เรื่อง first-response regression เทียบกับ base
 
 ## 6. แก้กฎ / re-auth session ผ่านเบราว์เซอร์
 
-Console มีสองหน้าที่ "เขียน" ได้ — ต่างจาก `/` ที่อ่านอย่างเดียว ทั้งคู่อยู่หลัง nginx basic auth เดียวกัน
+Console ที่เขียนได้อยู่หลัง account login ของ worker
 
 ### `/rules` — แก้คีย์เวิร์ด/คำตอบ
 
@@ -217,19 +188,10 @@ Console มีสองหน้าที่ "เขียน" ได้ — ต
 
 ### `/login` — login ของ LINE bot ด้วย QR ผ่านเบราว์เซอร์
 
-หน้านี้เป็น login ของ LINE bot เท่านั้น ไม่ใช่ login ของผู้ใช้งานระบบ ใช้แทน SSH+terminal เมื่อ session
-เดิมหมดอายุหรือถูกปฏิเสธ **ไม่ใช่การตั้งบอทใหม่ตั้งแต่ต้น** — บอทที่ยัง ไม่เคย login เลยต้องใช้ CLI ก่อน เพราะยังไม่มี
-worker รันให้เปิดหน้านี้:
-
-```bash
-cd /opt/line-first-response/current
-deno task login --bot-id bot-1 --method qr
-```
-
-หน้า `/login` โชว์ QR เป็นรูปจริง (เข้ารหัสฝั่ง server ไม่พึ่ง CDN ภายนอก) ให้เวลาประมาณ 150 วินาที
-เข้าสู่ระบบสำเร็จแล้ว **ต้องกด "Restart worker ตอนนี้"** ถึงจะใช้ session ใหม่จริง — login ผ่านหน้านี้ บันทึก session
-ใหม่ลงไฟล์ แต่ไม่ได้สลับ connection ของ worker ที่รันอยู่ให้อัตโนมัติ (เหมือนขั้น `reconnect-session` ใน recovery
-ladder ข้อ 5) ปุ่ม restart สั่ง exit ตัวเอง แล้วให้ systemd (`Restart=always`) ดึงกลับมาพร้อม session ใหม่
+หน้านี้เป็น login ของ LINE bot เท่านั้น ไม่ใช่ login ของผู้ใช้งานระบบ. user เปิด `/app` หลัง login แล้วสแกน QR ของ
+bot ที่ผูกกับตัวเองได้ทันที — รวมถึง bot ที่ยังไม่เคย login มาก่อน. หน้า `/login` โชว์ QR เป็นรูปจริง (เข้ารหัสฝั่ง server
+ไม่พึ่ง CDN ภายนอก) ให้เวลาประมาณ 150 วินาที. เมื่อสแกนสำเร็จ session ถูกบันทึกแล้ว `BotHost` จะ reconnect เฉพาะ
+bot นั้นอัตโนมัติ; ไม่ต้องกด restart และไม่กระทบ user/bot คนอื่น
 
 ถ้าเจอ `410 Gone` แปลว่าหน้าต่าง pairing หมดเวลา ไม่ใช่ credential ผิด — เริ่มใหม่แล้วสแกนให้เร็วขึ้น
 

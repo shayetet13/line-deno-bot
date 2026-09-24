@@ -632,6 +632,13 @@ describe('isAdminPath / createCombinedHandler', () => {
       req('/api/admin/restart', { method: 'POST', headers: { cookie } }),
     );
     expect(restart.status).toBe(200);
+
+    // /app's live speed panel reads /api/status; it always resolves to the
+    // signed-in person's own bot, so a `user` account must not get 403 here.
+    const apiStatus = await combined(req('/api/status', { headers: { cookie } }));
+    expect(apiStatus.status).toBe(200);
+    const alerts = await combined(req('/api/alerts', { headers: { cookie } }));
+    expect(alerts.status).toBe(403);
   });
 
   test('/account/logout clears the cookie and redirects to the login page', async () => {

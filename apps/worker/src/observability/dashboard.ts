@@ -68,15 +68,8 @@ export const DASHBOARD_HTML = renderPage({
     <table><tbody id="counters"></tbody></table>
   </section>`,
   script: `
-// Recalibrated 2026-09-21 against this release's real production floor on the
-// Tokyo 3 host (send p50 21.2ms/p95 26.2ms n=76, inbound p50 15.0ms n=184,
-// line_round_trip p50 31.0ms/p95 42.0ms n=64 — see docs/experiments.md's
-// native-encode-relay writeup: the ~20ms gap above the original 19ms/11ms
-// targets is LINE server-side processing, not network or our encode path, so
-// it is not reducible by region or code changes here). Budgets now sit above
-// the observed p50 with headroom instead of flagging the documented floor.
-const BUDGET = { send: 26, code: 0.5, local_total: 32, inbound: 20, line_round_trip: 36 };
-const GUARD  = { send: 32 };
+const BUDGET = { send: 19, code: 0.5, local_total: 30, inbound: 11, line_round_trip: 30 };
+const GUARD  = { send: 23 };
 const $ = (id) => document.getElementById(id);
 const ms = (v) => v === undefined || v === null ? '—' :
   v > 0 && v < 0.1 ? Math.round(v * 1000) + 'µs' : v.toFixed(1) + 'ms';

@@ -25,6 +25,9 @@ export interface RacingInboundConfig {
   /** How many fetches each dedicated poll races per round — see
    * {@link SquarePollAdapter}'s `pollRaceWidth`. */
   pollRaceWidth?: number;
+  /** Staggered in-flight fetches per dedicated poll — see
+   * {@link SquarePollAdapter}'s `pollStagger`. */
+  pollStagger?: number;
   talk?: boolean;
   square?: boolean;
   pollQuiet?: SquarePollQuietGate;
@@ -82,6 +85,7 @@ export function createRacingInbound(config: RacingInboundConfig): RacingInboundR
       logger: config.logger,
       intervalMs: config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
       ...(config.pollRaceWidth === undefined ? {} : { pollRaceWidth: config.pollRaceWidth }),
+      ...(config.pollStagger === undefined ? {} : { pollStagger: config.pollStagger }),
       quietBeforeNextFetchMs: () => config.pollQuiet?.remainingMs(room) ?? 0,
     });
 

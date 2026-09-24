@@ -33,7 +33,12 @@ async function publicAddressFor(hostname) {
     resolve6(hostname).catch(() => []),
     resolve4(hostname).catch(() => []),
   ]);
-  const addresses = [...ipv6, ...ipv4];
+  const family = process.env.LINE_IP_FAMILY;
+  const addresses = family === '4'
+    ? [...ipv4, ...ipv6]
+    : family === '6'
+    ? [...ipv6, ...ipv4]
+    : [...ipv6, ...ipv4];
   if (addresses.length === 0) throw new Error(`no public DNS addresses for ${hostname}`);
   publicAddressCache.set(hostname, addresses);
   publicRotations.set(hostname, 1);

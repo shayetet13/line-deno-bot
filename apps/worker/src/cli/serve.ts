@@ -34,8 +34,8 @@ Options
   --users-file <p>     Human accounts file (default .control/users.json).
   --primary-owner <u>  Username that owns the bot given by --config. Default:
                        the first admin to sign in.
-  --multi-bot          Legacy shared-process mode. Starts every owned bot;
-                       do not use for latency-sensitive workers.
+  --multi-bot          Multi-user console mode. Starts every owned bot and
+                       routes each signed-in person to their own bot.
   --port <n>           Operator console port (default 8791, loopback only).
   --no-serve           Do not start the console.
   --dry-run            Force dry run regardless of the config file.
@@ -146,8 +146,7 @@ async function main(): Promise<number> {
     })
     : undefined;
   if (registry !== undefined) {
-    // Legacy mode only. The isolated default never creates, warms, or routes
-    // another bot in this process.
+    // Multi-user console mode: restore every owned bot after a VPS restart.
     void registry.startOwned().catch((err: unknown) => {
       logger.error('starting other users’ bots failed', {
         reason: err instanceof Error ? err.message : String(err),
@@ -242,7 +241,7 @@ async function main(): Promise<number> {
   writeLine(
     registry === undefined
       ? 'isolation    : this process owns this bot only'
-      : 'isolation    : LEGACY shared-process multi-bot mode',
+      : 'isolation    : multi-user bot routing enabled',
   );
   writeLine('');
 
