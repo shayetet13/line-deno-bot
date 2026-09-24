@@ -25,8 +25,8 @@ Runtime เป็น Deno เพราะ LINEJS เป็น Deno-first — ด
 console กับทะเบียนบัญชีอยู่ thread หลัก, LINE connection ของแต่ละ bot อยู่ใน shard ของมัน bot ที่ decode
 หนักจึงไม่หน่วง bot ใน shard อื่น และใช้ได้ทุก core ([ADR-0011](./docs/decisions.md)). ต่อ bot: `lanes: 7`,
 `sendReservedLanes: 3`, `sendSpareLanes: 1` (reply 3 เส้นให้ scout เลือก, poll 4 เส้น) + PUSH หนึ่ง
-session ผ่าน Node sidecar ที่ใช้ร่วมกันต่อ thread. **ขนาดเครื่อง:** 20 bot ต้องการ dedicated vCPU อย่างน้อย 4 —
-1 vCPU กระโดดแน่นอน (runbook §10)
+session ผ่าน Node sidecar ที่ใช้ร่วมกันต่อ thread. **ขนาดเครื่อง:** 20 bot บน 2 vCPU ได้เมื่อ poll ห้องละ 1 ห้องต่อ
+bot; 1 vCPU กระโดดแน่นอน (runbook §10)
 
 Reply lane ถูกวัดต่อเนื่องด้วย scout: ยึด lane ที่เร็วที่สุดไว้ ย้ายเมื่อ lane อื่นเร็วกว่าชัดเจนเท่านั้น และเปิด connection
 ใหม่ให้ lane ที่ช้าเบื้องหลัง ([ADR-0010](./docs/decisions.md)). `CONNECTION_WARMUP_CONCURRENCY=2` จำกัดเฉพาะ
