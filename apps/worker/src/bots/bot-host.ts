@@ -6,6 +6,8 @@ import type { WorkerConfig } from '../config/env.ts';
 import { systemClock } from '../lib/clock.ts';
 import type { Logger } from '../logging/logger.ts';
 import { MetricsRecorder } from '../metrics/recorder.ts';
+import { threadLoopLag } from '../metrics/loop-lag.ts';
+import { threadLabel } from '../lib/thread.ts';
 import { StatusSource } from '../observability/snapshot.ts';
 import type { AlertEvaluator } from '../monitoring/alerts.ts';
 import type { SessionStore } from '../session/store.ts';
@@ -81,6 +83,10 @@ export class BotHost {
       origin: 'disconnected',
       clock: systemClock,
       metrics: new MetricsRecorder(),
+      // Which thread, and whether it has CPU to spare, matter before the
+      // first QR scan too: the operator sizes the host before bots go live.
+      loopLag: threadLoopLag(),
+      shard: threadLabel(),
     });
   }
 

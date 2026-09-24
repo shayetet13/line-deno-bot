@@ -1,0 +1,63 @@
+# line-first-response in Docker — driven by deploy/docker/release.sh.
+#
+# Host networking on purpose: no docker-proxy, NAT, veth or bridge conntrack on
+# the LINE connections, the host's sysctl tuning (deploy/tune-network.sh)
+# applies as is, and the console binds the host port directly.
+#
+# Variables (set by release.sh): LFR_ROOT, LFR_PORT, IMAGE_TAG, LFR_UID/GID.
+
+name: lfr-${LFR_PORT:-8793}
+
+services:
+  lfr:
+    image: line-first-response:${IMAGE_TAG:?IMAGE_TAG is required}
+    container_name: lfr-${LFR_PORT:-8793}
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    # SIGTERM lets the CLI stop receivers and finish replies in flight.
+    stop_grace_period: 30s
+    user: "${LFR_UID:-1000}:${LFR_GID:-1000}"
+    env_file:
+      - path: ${LFR_ROOT:-/opt/lfr-8793}/.env
+        required: false
+    environment:
+      HEALTH_URL: "http://127.0.0.1:${LFR_PORT:-8793}/account/login"
+    command:
+      - --config
+      - config/bots/bot-1.json
+      - --sessions-dir
+      - .sessions
+      - --users-file
+      - .control/users.json
+      - --multi-bot
+      - --host
+      - 0.0.0.0
+      - --port
+      - "${LFR_PORT:-8793}"
+    volumes:
+      # The session files ARE the LINE credentials: host directories, used in
+      # place, never copied into an image.
+      - ${LFR_ROOT:-/opt/lfr-8793}/config:/app/config
+      - ${LFR_ROOT:-/opt/lfr-8793}/.sessions:/app/.sessions
+      - ${LFR_ROOT:-/opt/lfr-8793}/.control:/app/.control
+      # The fastest-LINE-IP pin lives in the host's /etc/hosts. Without this
+      # mount the container keeps the copy it started with and never sees a
+      # new pin; pin-legy-fast-ips.sh rewrites in place so this stays live.
+      - /etc/hosts:/etc/hosts:ro
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Not read_only: Deno keeps small analysis caches under DENO_DIR at runtime,
+    # and a volume for them would outlive the image that seeded it — a later
+    # image with new dependencies would then refuse to start (--cached-only).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

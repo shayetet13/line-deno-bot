@@ -7,7 +7,11 @@
 #  1. kernel network settings for one-shot RPCs (deploy/tune-network.sh)
 #  2. hourly re-measure + pin of the fastest LINE edge address
 #     (deploy/pin-legy-fast-ips.sh via legy-fast-ip-pin.timer), run once now
-#  3. the current worker unit (fd limit, priority), without restarting it
+#  3. the current worker unit (fd limit, priority), without restarting it —
+#     skipped with SKIP_WORKER_UNIT=1 (the Docker deployment has no unit)
+#
+# The pin units name /opt/line-first-response; they are installed with APP_ROOT
+# substituted, so a Docker deployment under /opt/lfr-8793 works too.
 #
 # Undo: bash deploy/tune-network.sh --rollback; bash deploy/pin-legy-fast-ips.sh
 # --rollback; systemctl disable --now legy-fast-ip-pin.timer.
@@ -29,10 +33,11 @@ log 'fastest LINE edge pin: measuring now'
 if ! bash "$SRC/pin-legy-fast-ips.sh" --apply; then
   log 'pin not changed this run (see output above); the timer will retry hourly'
 fi
-install -m 0644 "$SRC/legy-fast-ip-pin.service" /etc/systemd/system/legy-fast-ip-pin.service
+sed "s#/opt/line-first-response#${APP_ROOT}#g" "$SRC/legy-fast-ip-pin.service" \
+  >/etc/systemd/system/legy-fast-ip-pin.service
 install -m 0644 "$SRC/legy-fast-ip-pin.timer" /etc/systemd/system/legy-fast-ip-pin.timer
 
-if [[ -f /etc/systemd/system/lfr-worker.service ]]; then
+if [[ "${SKIP_WORKER_UNIT:-0}" != 1 && -f /etc/systemd/system/lfr-worker.service ]]; then
   install -m 0644 "$SRC/lfr-worker.service" /etc/systemd/system/lfr-worker.service
   log 'worker unit updated; it takes effect on the next restart/release'
 fi

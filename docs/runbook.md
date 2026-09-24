@@ -323,3 +323,51 @@ log ตอนเริ่มต้องมี `isolation : multi-user bot routi
 - bind-mount `/etc/hosts:/etc/hosts:ro` ไม่งั้น container ใช้สำเนาตอน start และไม่เห็น pin ใหม่ —
   `pin-legy-fast-ips.sh` เขียนทับแบบคง inode เดิมไว้แล้ว bind mount จึงเห็นค่าใหม่ทันที
 - `BOT_SHARDS` ใส่ใน env ของ container; อย่าจำกัด `cpus:` ต่ำกว่าจำนวน shard + 1
+
+---
+
+## 11. Deploy ด้วย Docker (เช่น `http://172.237.8.10:8793/`)
+
+container เดียว, `network_mode: host`, console ตอบที่พอร์ตของ host ตรง ๆ (`--host 0.0.0.0`) และ bot
+ทั้งหมดรันใน bot shard ภายใน container (ADR-0011). ข้อมูลที่ต้องอยู่รอดอยู่นอก container ที่ `/opt/lfr-<port>/`:
+
+| path                          | คืออะไร                                                   |
+| ----------------------------- | -------------------------------------------------------- |
+| `config/bots/*.json`          | config + กฎ ของแต่ละ bot                                  |
+| `.sessions/`                  | credential LINE ของแต่ละ bot — ห้าม copy ไปเครื่องอื่นขณะใช้งาน |
+| `.control/users.json`         | บัญชีคน (mode 600)                                         |
+| `.env`                        | `LFR_ADMIN_PASSWORD`, `BOT_SHARDS`, … (mode 600)         |
+| `releases/<sha12>`, `current` | source ของแต่ละ release (5 ชุดล่าสุด) สำหรับ rollback         |
+
+### จากเครื่อง Windows
+
+```powershell
+.\deploy\deploy-docker.ps1                          # HEAD → root@172.237.8.10, port 8793
+.\deploy\deploy-docker.ps1 -IdentityFile "$HOME\.ssh\id_ed25519"
+.\deploy\deploy-docker.ps1 -Action Status           # release ที่ live + health
+.\deploy\deploy-docker.ps1 -Action Logs
+.\deploy\deploy-docker.ps1 -Action Rollback
+.\deploy\deploy-docker.ps1 -Action Tune             # sysctl + timer เลือก edge IP เร็วสุด (§10)
+```
+
+สคริปต์ส่งเฉพาะไฟล์ที่อยู่ใน git (`git archive`) — session, บัญชี, config จริง, key ไม่ออกจากเครื่อง. ฝั่ง server
+(`deploy/docker/release.sh`) build image ตาม commit นั้น, สลับ container, รอ `/account/login` ตอบ 200
+ภายใน 120s, ไม่ผ่าน = กลับไป release เดิมอัตโนมัติ
+
+### ติดตั้งครั้งแรก
+
+- ต้องมี Docker Engine + compose v2.24 ขึ้นไป บน VPS
+- **รหัส admin สุ่มให้และพิมพ์ครั้งเดียว** ตอน deploy แรก (`admin / …`) — ไม่ใช้รหัสที่อยู่ใน repo เพราะ console
+  นี้หันหน้า ออกอินเทอร์เน็ต. เก็บไว้ที่ `/opt/lfr-8793/.env`; เปลี่ยนใน console หลัง login
+- config แรกเป็น `dryRun: true`, ไม่มีห้อง, `slotBudget: 1` (ขนาดเครื่อง 2 vCPU, §10) —
+  ไม่โพสต์อะไรจนกว่าจะตั้งเอง
+- เปิดพอร์ต: `ufw allow 8793/tcp` หรือ Cloud Firewall ของ Linode (สคริปต์เตือนถ้า ufw ปิดอยู่ แต่ไม่แก้ firewall
+  ให้เอง)
+- console เป็น **HTTP ธรรมดา** — รหัสผ่านวิ่งแบบไม่เข้ารหัส เหมือน §1
+
+### ข้อควรระวัง
+
+- **บัญชี LINE หนึ่งบัญชีรันได้ที่เดียว** — ถ้า bot เดียวกันยังรันอยู่ที่อื่น (service เดิมบนเครื่องนี้ หรือ vps3) ให้หยุดก่อน ไม่งั้น
+  LINE อาจตัด session ทิ้ง
+- ทุกอย่างบนเครื่องเดียวกันแบ่ง 2 vCPU เดียวกัน — ถ้ามี service อื่นรันอยู่ CPU LOOP LAG บน `/app` จะบอก
+- image มี `node` (PUSH sidecar ต้องใช้) — image เดิมบน vps3 ไม่มี ทำให้ PUSH ไม่เคยเปิดใน Docker

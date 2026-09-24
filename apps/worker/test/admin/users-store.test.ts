@@ -62,6 +62,26 @@ describe('UsersStore — first read seeds the default admin', () => {
   });
 });
 
+describe('UsersStore — a configured first admin password', () => {
+  test('seeds the admin with it instead of the repository default', async () => {
+    const store = new UsersStore(path, { initialAdminPassword: 'x7-long-secret' });
+    const [admin] = await store.list();
+    expect(await verifyPassword('x7-long-secret', admin!.passwordHash)).toBe(true);
+    expect(await verifyPassword('Root@77#', admin!.passwordHash)).toBe(false);
+  });
+
+  test('is ignored once the file exists — it only ever seeds', async () => {
+    await new UsersStore(path).list();
+    const reopened = new UsersStore(path, { initialAdminPassword: 'x7-long-secret' });
+    const [admin] = await reopened.list();
+    expect(await verifyPassword('Root@77#', admin!.passwordHash)).toBe(true);
+  });
+
+  test('refuses one too short to be a password', () => {
+    expect(() => new UsersStore(path, { initialAdminPassword: '123' })).toThrow(ValidationError);
+  });
+});
+
 describe('UsersStore.create', () => {
   test('keeps every concurrent create instead of losing an update', async () => {
     const store = new UsersStore(path);

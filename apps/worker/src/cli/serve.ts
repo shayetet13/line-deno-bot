@@ -47,7 +47,11 @@ Options
                        run in BOT_SHARDS worker threads (default: one per
                        core, minus one); BOT_SHARDS=0 keeps them all on the
                        console thread.
-  --port <n>           Operator console port (default 8791, loopback only).
+  --port <n>           Operator console port (default 8791).
+  --host <addr>        Address the console binds (default 127.0.0.1). Use
+                       0.0.0.0 only behind a firewall or in a container that
+                       publishes it deliberately; every page but the login
+                       page and /api/health needs a signed-in account.
   --no-serve           Do not start the console.
   --dry-run            Force dry run regardless of the config file.
   --show-text          Log reply bodies in dry run. OFF by default.
@@ -59,6 +63,7 @@ interface Flags {
   dir: string;
   usersFile: string;
   primaryOwner: string | undefined;
+  host: string;
   port: number;
   serve: boolean;
   forceDryRun: boolean;
@@ -69,11 +74,12 @@ interface Flags {
 
 function parse(args: string[]): Flags {
   const f = parseArgs(args, {
-    string: ['config', 'sessions-dir', 'users-file', 'primary-owner', 'port', 'seconds'],
+    string: ['config', 'sessions-dir', 'users-file', 'primary-owner', 'host', 'port', 'seconds'],
     boolean: ['help', 'serve', 'dry-run', 'show-text', 'multi-bot'],
     default: {
       'sessions-dir': '.sessions',
       'users-file': '.control/users.json',
+      host: '127.0.0.1',
       port: '8791',
       serve: true,
     },
@@ -87,6 +93,9 @@ function parse(args: string[]): Flags {
   }
   const port = Number(f.port);
   if (!Number.isInteger(port) || port < 1) throw new ConfigError('--port must be a port number');
+  if (typeof f.host !== 'string' || !/^[0-9A-Za-z.:[\]-]+$/.test(f.host)) {
+    throw new ConfigError('--host must be an address such as 127.0.0.1 or 0.0.0.0');
+  }
   const seconds = f.seconds === undefined ? undefined : Number(f.seconds);
   if (seconds !== undefined && !Number.isFinite(seconds)) {
     throw new ConfigError('--seconds must be a number');
@@ -96,6 +105,7 @@ function parse(args: string[]): Flags {
     dir: f['sessions-dir'],
     usersFile: f['users-file'],
     primaryOwner: f['primary-owner'],
+    host: f.host,
     port,
     serve: f.serve,
     forceDryRun: f['dry-run'],
@@ -255,7 +265,11 @@ async function main(): Promise<number> {
 
   // Credentials remain per bot. Isolated service instances should use a
   // separate users file too, so their consoles cannot route to another bot.
-  const users = new UsersStore(flags.usersFile);
+  // LFR_ADMIN_PASSWORD only seeds a brand-new accounts file; a console that
+  // faces the internet must not start with the password written in this repo.
+  const users = new UsersStore(flags.usersFile, {
+    initialAdminPassword: Deno.env.get('LFR_ADMIN_PASSWORD') || undefined,
+  });
   const release = await describeRelease(env);
   const deps: TopologyDeps = { flags, env, bot, logger, users, release };
   const shards = flags.multiBot
@@ -265,6 +279,7 @@ async function main(): Promise<number> {
   const server = flags.serve
     ? startStatusServer({
       logger,
+      hostname: flags.host,
       port: flags.port,
       source: topology.status,
       alerts: topology.alerts,

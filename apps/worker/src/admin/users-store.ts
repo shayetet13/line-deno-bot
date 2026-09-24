@@ -62,10 +62,26 @@ const MIN_PASSWORD_LENGTH = 6;
 
 const sameUsername = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
+export interface UsersStoreOptions {
+  /** Password for the `admin` account created when the file does not exist
+   * yet. A deployment that faces the internet must set this: the fallback
+   * is written in this repository. Ignored once the file exists. */
+  initialAdminPassword?: string | undefined;
+}
+
 export class UsersStore {
   #tail: Promise<void> = Promise.resolve();
+  readonly #initialAdminPassword: string;
 
-  constructor(private readonly path: string) {}
+  constructor(private readonly path: string, options: UsersStoreOptions = {}) {
+    const initial = options.initialAdminPassword;
+    if (initial !== undefined && initial.length < MIN_PASSWORD_LENGTH) {
+      throw new ValidationError(
+        `initial admin password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+      );
+    }
+    this.#initialAdminPassword = initial ?? DEFAULT_ADMIN_PASSWORD;
+  }
 
   async secret(): Promise<string> {
     return await this.#exclusive(async () => (await this.#read()).secret);
@@ -240,7 +256,7 @@ export class UsersStore {
       users: [{
         userId: crypto.randomUUID(),
         username: DEFAULT_ADMIN_USERNAME,
-        passwordHash: await hashPassword(DEFAULT_ADMIN_PASSWORD),
+        passwordHash: await hashPassword(this.#initialAdminPassword),
         role: 'admin',
         displayName: undefined,
         createdAt: now,

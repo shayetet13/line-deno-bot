@@ -68,6 +68,7 @@ describe('ShardPool — bots in worker threads', () => {
     const status = await res.json();
     expect(status.workerId).toBe('bot-c');
     expect(status.readiness).toBeUndefined(); // disconnected: no live worker
+    expect(status.host.shard).toBe(hosts[2]!.shardId); // still says where it runs
 
     await Promise.all(hosts.map((host) => host.close()));
   });

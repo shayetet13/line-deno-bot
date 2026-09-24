@@ -1,0 +1,15 @@
+# The deploy script builds from `git archive`, which already holds only tracked
+# files. This list protects a hand-run `docker build .` from a working tree.
+.git
+.sessions
+.control
+.env
+.env.*
+config/bots/*.json
+!config/bots/*.example.json
+*_ed25519
+*.pem
+coverage
+traces
+node_modules
+*.sqlite*
