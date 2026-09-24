@@ -92,7 +92,10 @@ try {
     }
 
     $archive = Join-Path ([IO.Path]::GetTempPath()) "lfr-$commit.tar"
-    & git archive --format=tar -o $archive $commit
+    # Everything in the archive runs on Linux. Git for Windows converts line
+    # endings to CRLF on export when core.autocrlf is on, which breaks every
+    # shell script on its first line; export the repository's LF as stored.
+    & git -c core.autocrlf=false -c core.eol=lf archive --format=tar -o $archive $commit
     if ($LASTEXITCODE -ne 0) { Fail 'git archive failed.' }
 
     Write-Host "[Deploy] $commit -> $target (port $Port)" -ForegroundColor Cyan
@@ -103,7 +106,9 @@ try {
 
     # The release script travels inside the archive, so the server always runs
     # the version that matches the commit being deployed.
-    Invoke-Remote "tar -xOf $remoteArchive deploy/docker/release.sh | $remoteEnv bash -s -- $remoteArchive $commit"
+    # tr strips any CR that still slipped through (an archive from an older
+    # checkout of this script), so the release script always parses.
+    Invoke-Remote "tar -xOf $remoteArchive deploy/docker/release.sh | tr -d '\r' | $remoteEnv bash -s -- $remoteArchive $commit"
     Write-Host "Console: http://${VpsHost}:$Port/account/login" -ForegroundColor Green
 } finally {
     Pop-Location
