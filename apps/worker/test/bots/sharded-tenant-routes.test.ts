@@ -5,7 +5,7 @@ import { UsersStore } from '../../src/admin/users-store.ts';
 import { BotRegistry } from '../../src/bots/bot-registry.ts';
 import { type ShardedBotHost, ShardPool } from '../../src/bots/shard-pool.ts';
 import { createShardedTenantRoutes } from '../../src/bots/tenant-routes.ts';
-import { PRIMARY_CONFIG, silentLogger } from './fixture.ts';
+import { PRIMARY_CONFIG, silentLogger, TEST_ADMIN_PASSWORD } from './fixture.ts';
 
 /**
  * The multi-user console with every bot in a shard thread: accounts are
@@ -25,7 +25,9 @@ beforeEach(async () => {
   await Deno.mkdir(`${dir}/.sessions`, { recursive: true });
   const configPath = `${dir}/config/bots/bot-1.json`;
   await Deno.writeTextFile(configPath, JSON.stringify({ ...PRIMARY_CONFIG, dryRun: true }));
-  users = new UsersStore(`${dir}/.control/users.json`);
+  users = new UsersStore(`${dir}/.control/users.json`, {
+    initialAdminPassword: TEST_ADMIN_PASSWORD,
+  });
   pool = new ShardPool({
     shards: 2,
     logger: silentLogger(),
@@ -80,7 +82,7 @@ const ruleIds = async (cookie: string): Promise<string[]> => {
 
 describe('sharded multi-user console', () => {
   test('each person reaches only their own bot, each running in a shard', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     await users.create({ username: 'alice', password: 'alice-pass', role: 'user' });
     const alice = await signIn('alice', 'alice-pass');
 
@@ -93,7 +95,7 @@ describe('sharded multi-user console', () => {
   });
 
   test('account routes are answered on the console thread, not forwarded', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
 
     const me = await get('/api/account/me', admin);
     expect(me.status).toBe(200);
@@ -105,7 +107,7 @@ describe('sharded multi-user console', () => {
   });
 
   test('removing a person stops their bot in its shard', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     const bob = await users.create({ username: 'bob', password: 'bob-pass', role: 'user' });
     const bobCookie = await signIn('bob', 'bob-pass');
     await get('/api/rules', bobCookie); // assigns and starts bob's bot

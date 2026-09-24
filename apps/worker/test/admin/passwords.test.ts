@@ -4,12 +4,12 @@ import { hashPassword, verifyPassword } from '../../src/admin/passwords.ts';
 
 describe('hashPassword / verifyPassword', () => {
   test('a hash verifies against the same password', async () => {
-    const hash = await hashPassword('Root@77#');
-    expect(await verifyPassword('Root@77#', hash)).toBe(true);
+    const hash = await hashPassword('correct-horse-7');
+    expect(await verifyPassword('correct-horse-7', hash)).toBe(true);
   });
 
   test('a hash does not verify against a different password', async () => {
-    const hash = await hashPassword('Root@77#');
+    const hash = await hashPassword('correct-horse-7');
     expect(await verifyPassword('wrong', hash)).toBe(false);
   });
 

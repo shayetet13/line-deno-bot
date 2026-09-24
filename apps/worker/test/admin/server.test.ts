@@ -6,6 +6,7 @@ import type { LineLoginOptions } from '../../src/adapters/linejs/login.ts';
 import { createAdminHandler, createCombinedHandler, isAdminPath } from '../../src/admin/server.ts';
 import { LoginFlow } from '../../src/admin/login-flow.ts';
 import { UsersStore } from '../../src/admin/users-store.ts';
+import { TEST_ADMIN_PASSWORD } from '../bots/fixture.ts';
 import { parseBotConfig } from '../../src/config/bot-config.ts';
 import { loadConfig } from '../../src/config/env.ts';
 import { createStatusHandler } from '../../src/observability/server.ts';
@@ -57,7 +58,9 @@ async function make(
 ): Promise<Harness> {
   const configPath = `${dir}/bot.json`;
   await Deno.writeTextFile(configPath, JSON.stringify(CONFIG_BODY));
-  const users = new UsersStore(`${dir}/.control/users.json`);
+  const users = new UsersStore(`${dir}/.control/users.json`, {
+    initialAdminPassword: TEST_ADMIN_PASSWORD,
+  });
 
   const clock = new FakeClock(1_700_000_000_000);
   const logger = new Logger({ level: 'error', sink: () => {} });
@@ -582,11 +585,11 @@ describe('isAdminPath / createCombinedHandler', () => {
     expect(res.status === 200 || res.status === 503).toBe(true);
   });
 
-  test('the default admin/Root@77# account reaches the dashboard and rules pages', async () => {
+  test('the first admin account reaches the dashboard and rules pages', async () => {
     const h = await make();
     const status = createStatusHandler(h.worker.status);
     const combined = createCombinedHandler(h.handler, status, { users: h.users });
-    const cookie = await loginCookie(h, 'admin', 'Root@77#');
+    const cookie = await loginCookie(h, 'admin', TEST_ADMIN_PASSWORD);
 
     const dashboard = await combined(req('/', { headers: { cookie } }));
     expect(await dashboard.text()).toContain('dashboard');
@@ -801,7 +804,9 @@ describe('with no worker (never connected, or session rejected)', () => {
       botId: 'bot-1',
       configPath,
       sessions,
-      users: new UsersStore(`${dir}/.control/users.json`),
+      users: new UsersStore(`${dir}/.control/users.json`, {
+        initialAdminPassword: TEST_ADMIN_PASSWORD,
+      }),
       logger,
       loginFlow,
       linejsStoragePath: `${dir}/bot.linejs.json`,

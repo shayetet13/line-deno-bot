@@ -56,22 +56,28 @@ interface UsersFile {
 }
 
 const DEFAULT_ADMIN_USERNAME = 'admin';
-/** Safe bootstrap credential; operators should change it after first login. */
-const DEFAULT_ADMIN_PASSWORD = 'Root@77#';
 const MIN_PASSWORD_LENGTH = 6;
+/** Where a generated first admin password is written, beside the accounts
+ * file and readable by its owner only. It is never logged or printed: whoever
+ * can read the accounts file can read this, and nobody else. */
+export const INITIAL_ADMIN_PASSWORD_FILE = 'initial-admin-password.txt';
+const GENERATED_PASSWORD_BYTES = 18;
 
 const sameUsername = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
 export interface UsersStoreOptions {
   /** Password for the `admin` account created when the file does not exist
-   * yet. A deployment that faces the internet must set this: the fallback
-   * is written in this repository. Ignored once the file exists. */
+   * yet. Without it a random one is generated and written to
+   * {@link INITIAL_ADMIN_PASSWORD_FILE}. Ignored once the file exists. */
   initialAdminPassword?: string | undefined;
+  /** Told where a generated password was written (the path, never the
+   * password), so the operator can be pointed at it. */
+  onGeneratedPassword?: ((file: string) => void) | undefined;
 }
 
 export class UsersStore {
   #tail: Promise<void> = Promise.resolve();
-  readonly #initialAdminPassword: string;
+  readonly #options: UsersStoreOptions;
 
   constructor(private readonly path: string, options: UsersStoreOptions = {}) {
     const initial = options.initialAdminPassword;
@@ -80,7 +86,7 @@ export class UsersStore {
         `initial admin password must be at least ${MIN_PASSWORD_LENGTH} characters`,
       );
     }
-    this.#initialAdminPassword = initial ?? DEFAULT_ADMIN_PASSWORD;
+    this.#options = options;
   }
 
   async secret(): Promise<string> {
@@ -251,12 +257,14 @@ export class UsersStore {
 
   async #seed(): Promise<UsersFile> {
     const now = Date.now();
+    const configured = this.#options.initialAdminPassword;
+    const password = configured ?? randomBytes(GENERATED_PASSWORD_BYTES).toString('base64url');
     const file: UsersFile = {
       secret: randomBytes(32).toString('hex'),
       users: [{
         userId: crypto.randomUUID(),
         username: DEFAULT_ADMIN_USERNAME,
-        passwordHash: await hashPassword(this.#initialAdminPassword),
+        passwordHash: await hashPassword(password),
         role: 'admin',
         displayName: undefined,
         createdAt: now,
@@ -264,7 +272,17 @@ export class UsersStore {
       }],
     };
     await this.#write(file);
+    if (configured === undefined) await this.#recordGenerated(password);
     return file;
+  }
+
+  async #recordGenerated(password: string): Promise<void> {
+    const lastSlash = Math.max(this.path.lastIndexOf('/'), this.path.lastIndexOf('\\'));
+    const dir = lastSlash > 0 ? this.path.slice(0, lastSlash) : '.';
+    const file = `${dir}/${INITIAL_ADMIN_PASSWORD_FILE}`;
+    await Deno.writeTextFile(file, `${password}\n`, { mode: 0o600 });
+    await Deno.chmod(file, 0o600).catch(() => {}); // not supported on Windows
+    this.#options.onGeneratedPassword?.(file);
   }
 
   async #write(file: UsersFile): Promise<void> {

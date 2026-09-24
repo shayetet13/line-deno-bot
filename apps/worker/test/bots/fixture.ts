@@ -23,6 +23,10 @@ export const PRIMARY_CONFIG = {
 
 export const silentLogger = (): Logger => new Logger({ level: 'error', sink: () => {} });
 
+/** The first admin's password in every test harness. Production has none:
+ * it is configured (LFR_ADMIN_PASSWORD) or generated per install. */
+export const TEST_ADMIN_PASSWORD = 'test-admin-pass';
+
 export const noSession: typeof connectToLine = () =>
   Promise.reject(new Error('no stored session for this bot'));
 
@@ -90,7 +94,9 @@ export async function makeHarness(
   const configPath = `${dir}/config/bots/bot-1.json`;
   await Deno.writeTextFile(configPath, JSON.stringify(PRIMARY_CONFIG));
 
-  const users = new UsersStore(`${dir}/.control/users.json`);
+  const users = new UsersStore(`${dir}/.control/users.json`, {
+    initialAdminPassword: TEST_ADMIN_PASSWORD,
+  });
   const sessions = new MemorySessionStore();
   const logger = silentLogger();
   const hosts = new Map<string, BotHost>();

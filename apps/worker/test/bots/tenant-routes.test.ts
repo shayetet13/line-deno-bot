@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, it as test } from '@std/testing/bdd';
 import { expect } from '@std/expect';
 import { createCombinedHandler } from '../../src/admin/server.ts';
 import { createTenantRoutes } from '../../src/bots/tenant-routes.ts';
-import { fakeRuntime, type Harness, makeHarness, silentLogger } from './fixture.ts';
+import {
+  fakeRuntime,
+  type Harness,
+  makeHarness,
+  silentLogger,
+  TEST_ADMIN_PASSWORD,
+} from './fixture.ts';
 
 /**
  * The whole point of the multi-login work, exercised end to end: several
@@ -71,7 +77,7 @@ async function addUser(username: string, role: 'admin' | 'user' = 'user'): Promi
 
 describe('several people signed in at the same time', () => {
   test('each sees their own rules, not the shared bot’s', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     const alice = await addUser('alice');
     const bob = await addUser('bob');
 
@@ -81,7 +87,7 @@ describe('several people signed in at the same time', () => {
   });
 
   test('a rule one person adds appears for nobody else', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     const alice = await addUser('alice');
     const bob = await addUser('bob');
 
@@ -118,7 +124,7 @@ describe('several people signed in at the same time', () => {
   });
 
   test('each has their own LINE login state', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     const alice = await addUser('alice');
     const bob = await addUser('bob');
 
@@ -166,7 +172,7 @@ describe('several people signed in at the same time', () => {
   });
 
   test('a non-admin cannot reach admin pages, even after the admin’s browser is open', async () => {
-    await signIn('admin', 'Root@77#');
+    await signIn('admin', TEST_ADMIN_PASSWORD);
     const alice = await addUser('alice');
     expect((await get('/', alice)).status).toBe(302);
     expect((await get('/api/users', alice)).status).toBe(403);
@@ -222,7 +228,7 @@ describe('restarting and logging out', () => {
 
 describe('an account is checked on every request, not only at sign-in', () => {
   test('a deleted person’s cookie stops working immediately', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     const alice = await addUser('alice');
     expect((await get('/api/rules', alice)).status).toBe(200);
 
@@ -234,7 +240,7 @@ describe('an account is checked on every request, not only at sign-in', () => {
   });
 
   test('deleting a person shuts their bot down and leaves others running', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     const alice = await addUser('alice');
     const bob = await addUser('bob');
     await get('/api/rules', alice);
@@ -257,7 +263,7 @@ describe('an account is checked on every request, not only at sign-in', () => {
   });
 
   test('a demoted admin loses admin pages at once, not when the cookie expires', async () => {
-    const admin = await signIn('admin', 'Root@77#');
+    const admin = await signIn('admin', TEST_ADMIN_PASSWORD);
     await h.users.create({ username: 'boss2', password: 'boss2-pass', role: 'admin' });
     const boss2 = await signIn('boss2', 'boss2-pass');
     expect((await get('/api/users', boss2)).status).toBe(200);

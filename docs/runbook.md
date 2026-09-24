@@ -357,8 +357,10 @@ container เดียว, `network_mode: host`, console ตอบที่พ�
 ### ติดตั้งครั้งแรก
 
 - ต้องมี Docker Engine + compose v2.24 ขึ้นไป บน VPS
-- **รหัส admin สุ่มให้และพิมพ์ครั้งเดียว** ตอน deploy แรก (`admin / …`) — ไม่ใช้รหัสที่อยู่ใน repo เพราะ console
-  นี้หันหน้า ออกอินเทอร์เน็ต. เก็บไว้ที่ `/opt/lfr-8793/.env`; เปลี่ยนใน console หลัง login
+- **ใน repo ไม่มีรหัส admin** — ตอนติดตั้งครั้งแรก app สุ่มรหัสเองแล้วเขียนไว้ที่
+  `/opt/lfr-8793/.control/initial-admin-password.txt` (อ่านได้เฉพาะเจ้าของไฟล์ ไม่ลง log) และสคริปต์ deploy
+  แสดงให้คนที่ deploy เห็นหนึ่งครั้ง (`admin / …`). login แล้วเปลี่ยนรหัสใน console จากนั้นลบไฟล์นั้นทิ้ง.
+  จะกำหนดรหัสเองก็ได้ด้วย `LFR_ADMIN_PASSWORD=` ใน `/opt/lfr-8793/.env` ก่อน deploy ครั้งแรก
 - config แรกเป็น `dryRun: true`, ไม่มีห้อง, `slotBudget: 1` (ขนาดเครื่อง 2 vCPU, §10) —
   ไม่โพสต์อะไรจนกว่าจะตั้งเอง
 - เปิดพอร์ต: `ufw allow 8793/tcp` หรือ Cloud Firewall ของ Linode (สคริปต์เตือนถ้า ufw ปิดอยู่ แต่ไม่แก้ firewall

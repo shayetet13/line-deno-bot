@@ -265,10 +265,15 @@ async function main(): Promise<number> {
 
   // Credentials remain per bot. Isolated service instances should use a
   // separate users file too, so their consoles cannot route to another bot.
-  // LFR_ADMIN_PASSWORD only seeds a brand-new accounts file; a console that
-  // faces the internet must not start with the password written in this repo.
+  // A brand-new accounts file gets its `admin` password from
+  // LFR_ADMIN_PASSWORD, or a generated one written beside the file (mode
+  // 600). Only the path is logged, never the password.
   const users = new UsersStore(flags.usersFile, {
     initialAdminPassword: Deno.env.get('LFR_ADMIN_PASSWORD') || undefined,
+    onGeneratedPassword: (file) =>
+      logger.warn('first admin password generated — read it from this file, then change it', {
+        file,
+      }),
   });
   const release = await describeRelease(env);
   const deps: TopologyDeps = { flags, env, bot, logger, users, release };

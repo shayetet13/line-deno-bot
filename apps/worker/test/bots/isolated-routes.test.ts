@@ -6,7 +6,7 @@ import { createIsolatedHandler } from '../../src/bots/isolated-routes.ts';
 import { loadConfig } from '../../src/config/env.ts';
 import { Logger } from '../../src/logging/logger.ts';
 import { MemorySessionStore } from '../../src/session/store.ts';
-import { noSession, PRIMARY_CONFIG } from './fixture.ts';
+import { noSession, PRIMARY_CONFIG, TEST_ADMIN_PASSWORD } from './fixture.ts';
 
 let dir: string;
 
@@ -27,7 +27,9 @@ describe('isolated routes', () => {
   test('serves only its primary host and needs no BotRegistry', async () => {
     const logger = new Logger({ level: 'error', sink: () => {} });
     const sessions = new MemorySessionStore();
-    const users = new UsersStore(`${dir}/.control/bot-users/bot-1.json`);
+    const users = new UsersStore(`${dir}/.control/bot-users/bot-1.json`, {
+      initialAdminPassword: TEST_ADMIN_PASSWORD,
+    });
     const host = new BotHost({
       botId: 'bot-1',
       configPath: `${dir}/config/bots/bot-1.json`,
@@ -44,7 +46,7 @@ describe('isolated routes', () => {
     const login = await handler(req('/api/account/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: 'admin', password: 'Root@77#' }),
+      body: JSON.stringify({ username: 'admin', password: TEST_ADMIN_PASSWORD }),
     }));
     const cookie = login.headers.get('set-cookie');
     expect(cookie).toBeTruthy();
