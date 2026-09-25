@@ -172,6 +172,14 @@ switch_to() {
 # Stops the containers being taken over and waits for the port to free up.
 stop_replaced() {
   ((${#REPLACE[@]} > 0)) || return 0
+  # The old installation's state is about to be written by a new version:
+  # keep a copy of it exactly as it was, owner-only.
+  local backup
+  backup="$ROOT/backups/takeover-$(date -u +%Y%m%dT%H%M%SZ).tgz"
+  mkdir -p "$ROOT/backups"
+  (umask 077 && tar -czf "$backup" -C "$DATA" --ignore-failed-read config .sessions .control .env 2>/dev/null) ||
+    die "could not back up $DATA — nothing was stopped"
+  log "backed up $DATA to $backup"
   log "stopping ${REPLACE[*]} (stopped, not removed; restart policy off so a reboot cannot start them next to this one)"
   : >"$ROOT/replaced-containers"
   local name policy
