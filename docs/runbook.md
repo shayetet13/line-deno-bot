@@ -373,3 +373,18 @@ container เดียว, `network_mode: host`, console ตอบที่พ�
   LINE อาจตัด session ทิ้ง
 - ทุกอย่างบนเครื่องเดียวกันแบ่ง 2 vCPU เดียวกัน — ถ้ามี service อื่นรันอยู่ CPU LOOP LAG บน `/app` จะบอก
 - image มี `node` (PUSH sidecar ต้องใช้) — image เดิมบน vps3 ไม่มี ทำให้ PUSH ไม่เคยเปิดใน Docker
+
+### ใช้แทนระบบเดิมที่รันอยู่ (เช่น `linebot-vps3` ที่พอร์ต 8793)
+
+```powershell
+.\deploy\deploy-docker.ps1 -Replace linebot-vps3-front,linebot-vps3
+```
+
+- **ใช้ข้อมูลเดิมทั้งหมด** — สคริปต์อ่านจาก mount ของ `linebot-vps3` เองว่า `config/`, `.sessions/`,
+  `.control/` อยู่ที่ไหน (ต้องอยู่โฟลเดอร์เดียวกัน ไม่งั้นหยุดและขอ `-DataRoot <โฟลเดอร์>`) → บัญชีและรหัส admin เดิม,
+  session LINE, กฎ ใช้ต่อ ไม่ต้องสแกน QR ใหม่ และรันด้วย uid เดียวกับเจ้าของไฟล์เดิม
+- build image ใหม่ให้เสร็จก่อน ระหว่างนั้นระบบเดิมยังให้บริการ แล้วค่อย **หยุด** (ไม่ลบ) container เดิมและปิด restart
+  policy ของมันไว้ ไม่ให้ reboot แล้วกลับมารันซ้อนบน session เดียวกัน
+- ตัวใหม่ไม่ขึ้นภายใน 120s → เปิดระบบเดิมกลับเองอัตโนมัติ; `-Action Rollback` (ตอนยังไม่มี release ก่อนหน้าของตัวใหม่)
+  → คืนพอร์ตให้ระบบเดิม พร้อม restart policy เดิมของมัน
+- deploy ครั้งถัดไปไม่ต้องใส่ `-Replace` — โฟลเดอร์ข้อมูลถูกจำไว้ที่ `/opt/lfr-8793/data-root`
