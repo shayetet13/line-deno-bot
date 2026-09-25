@@ -29,7 +29,8 @@ KEEP="${KEEP_RELEASES:-5}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-120}"
 IMAGE=line-first-response
 NAME="lfr-$PORT"
-read -r -a REPLACE <<<"${LFR_REPLACE//,/ }"
+REPLACE_LIST="${LFR_REPLACE:-}"
+read -r -a REPLACE <<<"${REPLACE_LIST//,/ }"
 
 log() { printf '\033[36m[docker-release]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[docker-release]\033[0m %s\n' "$*" >&2; }
@@ -89,8 +90,9 @@ status() {
   docker ps -a --filter "name=^${NAME}$" --format 'container: {{.Names}} {{.Status}} {{.Image}}' || true
   if [[ -n "$old" ]]; then
     printf 'replaced: %s\n' "$old"
-    # shellcheck disable=SC2086
-    docker ps -a --filter "name=^($(tr ' ' '|' <<<"$old"))$" --format '  {{.Names}} {{.Status}}' || true
+    for name in $old; do
+      docker ps -a --filter "name=^${name}$" --format '  {{.Names}} {{.Status}}' || true
+    done
   fi
   curl -s --max-time 5 "http://127.0.0.1:$PORT/api/health" || true
   echo
