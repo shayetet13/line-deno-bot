@@ -85,9 +85,14 @@ port_busy() {
     ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN
     return
   fi
+  # Only tables that exist: a host without IPv6 has no tcp6, and awk failing
+  # on a missing file must not read as "port free".
+  local tables=()
+  for table in /proc/net/tcp /proc/net/tcp6; do [[ -r "$table" ]] && tables+=("$table"); done
+  ((${#tables[@]} > 0)) || return 1
   awk -v port="$(printf '%04X' "$PORT")" '
     $4 == "0A" { n = split($2, a, ":"); if (toupper(a[n]) == port) found = 1 }
-    END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+    END { exit !found }' "${tables[@]}"
 }
 port_holder() {
   if command -v ss >/dev/null; then ss -ltnp "sport = :$PORT" | tail -1; else echo "(see: docker ps)"; fi
