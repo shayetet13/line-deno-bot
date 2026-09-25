@@ -18,6 +18,16 @@ param(
 
     [string]$IdentityFile,
 
+    # Existing installation whose accounts, LINE sessions and rules this
+    # deployment takes over (its config/, .sessions/, .control/, .env).
+    [ValidatePattern('^/[A-Za-z0-9._/-]+$')]
+    [string]$DataRoot,
+
+    # Containers of that installation to stop (never remove) once the new
+    # image is built; comma separated. Restarted if the new one fails.
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.,-]*$')]
+    [string]$Replace,
+
     [switch]$AllowDirty
 )
 
@@ -29,6 +39,8 @@ param(
 #   .\deploy\deploy-docker.ps1 -Action Logs
 #   .\deploy\deploy-docker.ps1 -Action Rollback
 #   .\deploy\deploy-docker.ps1 -Action Tune       # sysctl + fastest-IP timer on the host
+#   # take over an existing installation (its data and its port):
+#   .\deploy\deploy-docker.ps1 -DataRoot /opt/line-first-response -Replace linebot-vps3-front,linebot-vps3
 #
 # Only tracked files are shipped (git archive): sessions, accounts, real bot
 # configs and keys never leave this machine. State lives on the server under
@@ -58,6 +70,8 @@ if ($IdentityFile) {
 $target = "$User@$VpsHost"
 $root = "/opt/lfr-$Port"
 $remoteEnv = "LFR_PORT=$Port LFR_ROOT=$root"
+if ($DataRoot) { $remoteEnv += " LFR_DATA=$DataRoot" }
+if ($Replace) { $remoteEnv += " LFR_REPLACE=$Replace" }
 
 function Invoke-Remote([string]$Command) {
     & ssh @sshArgs -tt $target $Command

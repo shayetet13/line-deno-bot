@@ -6,18 +6,30 @@
 #   bash release.sh --status                  what is live
 #   bash release.sh --rollback                back to the previous release
 #
-# Environment: LFR_PORT (8793), LFR_ROOT (/opt/lfr-$LFR_PORT), KEEP_RELEASES (5),
-# LFR_SLOT_BUDGET (1 — polled rooms per bot for a brand-new install; see
-# docs/runbook.md §10 for why a 2-vCPU host wants 1).
+# Environment:
+#   LFR_PORT     console port (8793)
+#   LFR_ROOT     releases and bookkeeping (/opt/lfr-$LFR_PORT)
+#   LFR_DATA     config/, .sessions/, .control/, .env — the state that must
+#                survive (default: LFR_ROOT). Point it at an existing
+#                installation to take over its accounts, LINE sessions and
+#                rules unchanged. Remembered for later runs.
+#   LFR_REPLACE  containers this release takes over from (comma or space
+#                separated), e.g. "linebot-vps3-front,linebot-vps3". They are
+#                stopped — never removed — only after the new image is built,
+#                started again if the new release does not come up, and are
+#                what --rollback returns to when there is no earlier release.
+#   KEEP_RELEASES (5), HEALTH_TIMEOUT_S (120), LFR_SLOT_BUDGET (1 — polled
+#   rooms per bot for a brand-new install; docs/runbook.md §10).
 set -Eeuo pipefail
 
 PORT="${LFR_PORT:-8793}"
 ROOT="${LFR_ROOT:-/opt/lfr-$PORT}"
+DATA="${LFR_DATA:-$(cat "$ROOT/data-root" 2>/dev/null || printf '%s' "$ROOT")}"
 KEEP="${KEEP_RELEASES:-5}"
-UID_GID="${LFR_UID:-1000}:${LFR_GID:-1000}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-120}"
 IMAGE=line-first-response
 NAME="lfr-$PORT"
+read -r -a REPLACE <<<"${LFR_REPLACE//,/ }"
 
 log() { printf '\033[36m[docker-release]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[docker-release]\033[0m %s\n' "$*" >&2; }
@@ -27,11 +39,24 @@ die() { printf '\033[31m[docker-release]\033[0m %s\n' "$*" >&2; exit 1; }
 command -v docker >/dev/null || die 'docker is not installed'
 docker compose version >/dev/null 2>&1 || die 'docker compose v2 is required'
 [[ "$PORT" =~ ^[0-9]+$ ]] || die "LFR_PORT must be a number, got $PORT"
+for name in "${REPLACE[@]}"; do
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "not a container name: $name"
+done
+
+# Run as whoever owns the existing state, so taking over an installation
+# never changes the ownership of its files (and the old one can come back).
+if [[ -n "${LFR_UID:-}" ]]; then
+  UID_GID="${LFR_UID}:${LFR_GID:-$LFR_UID}"
+elif [[ -d "$DATA/.control" ]]; then
+  UID_GID="$(stat -c '%u:%g' "$DATA/.control")"
+else
+  UID_GID=1000:1000
+fi
 
 compose() {
   local release="$1" tag="$2"
   shift 2
-  LFR_ROOT="$ROOT" LFR_PORT="$PORT" IMAGE_TAG="$tag" \
+  LFR_DATA="$DATA" LFR_PORT="$PORT" IMAGE_TAG="$tag" \
     LFR_UID="${UID_GID%%:*}" LFR_GID="${UID_GID##*:}" \
     docker compose -f "$release/deploy/docker/compose.yml" "$@"
 }
@@ -47,17 +72,26 @@ healthy() {
   return 1
 }
 
+port_busy() { ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; }
 current_tag() { cat "$ROOT/current-tag" 2>/dev/null || true; }
 previous_tag() { cat "$ROOT/previous-tag" 2>/dev/null || true; }
+replaced() { cat "$ROOT/replaced-containers" 2>/dev/null || true; }
 
 status() {
-  printf 'root:     %s\n' "$ROOT"
-  local live prev
+  local live prev old
   live="$(current_tag)"
   prev="$(previous_tag)"
+  old="$(replaced)"
+  printf 'root:     %s\n' "$ROOT"
+  printf 'data:     %s\n' "$DATA"
   printf 'live:     %s\n' "${live:-none}"
   printf 'previous: %s\n' "${prev:-none}"
-  docker ps --filter "name=^${NAME}$" --format 'container: {{.Names}} {{.Status}} {{.Image}}' || true
+  docker ps -a --filter "name=^${NAME}$" --format 'container: {{.Names}} {{.Status}} {{.Image}}' || true
+  if [[ -n "$old" ]]; then
+    printf 'replaced: %s\n' "$old"
+    # shellcheck disable=SC2086
+    docker ps -a --filter "name=^($(tr ' ' '|' <<<"$old"))$" --format '  {{.Names}} {{.Status}}' || true
+  fi
   curl -s --max-time 5 "http://127.0.0.1:$PORT/api/health" || true
   echo
 }
@@ -67,38 +101,77 @@ switch_to() {
   compose "$ROOT/releases/$tag" "$tag" up -d --force-recreate --remove-orphans
 }
 
+# Stops the containers being taken over and waits for the port to free up.
+stop_replaced() {
+  ((${#REPLACE[@]} > 0)) || return 0
+  log "stopping ${REPLACE[*]} (stopped, not removed)"
+  docker stop -t 30 "${REPLACE[@]}" >/dev/null
+  printf '%s\n' "${REPLACE[*]}" >"$ROOT/replaced-containers"
+  local deadline=$((SECONDS + 15))
+  while port_busy && ((SECONDS < deadline)); do sleep 1; done
+  if port_busy; then
+    start_replaced
+    die "port $PORT is still in use after stopping ${REPLACE[*]}: $(ss -ltnp "sport = :$PORT" | tail -1)"
+  fi
+}
+
+start_replaced() {
+  local old
+  old="$(replaced)"
+  [[ -n "$old" ]] || return 0
+  warn "starting the replaced containers again: $old"
+  # shellcheck disable=SC2086
+  docker start $old >/dev/null
+}
+
 rollback() {
   local prev
   prev="$(previous_tag)"
-  [[ -n "$prev" && -d "$ROOT/releases/$prev" ]] || die 'no previous release to roll back to'
-  log "rolling back to $prev"
-  switch_to "$prev" && healthy ||
-    die "previous release $prev is not healthy either — see: docker logs $NAME"
-  printf '%s\n' "$(current_tag)" >"$ROOT/previous-tag"
-  printf '%s\n' "$prev" >"$ROOT/current-tag"
-  ln -sfn "$ROOT/releases/$prev" "$ROOT/current"
-  log "rolled back; live is $prev"
+  if [[ -n "$prev" && -d "$ROOT/releases/$prev" ]]; then
+    log "rolling back to $prev"
+    switch_to "$prev" && healthy ||
+      die "previous release $prev is not healthy either — see: docker logs $NAME"
+    printf '%s\n' "$(current_tag)" >"$ROOT/previous-tag"
+    printf '%s\n' "$prev" >"$ROOT/current-tag"
+    ln -sfn "$ROOT/releases/$prev" "$ROOT/current"
+    log "rolled back; live is $prev"
+    return 0
+  fi
+  [[ -n "$(replaced)" ]] || die 'no previous release to roll back to'
+  log "no earlier release of $NAME — handing port $PORT back to: $(replaced)"
+  docker stop -t 30 "$NAME" >/dev/null 2>&1 || true
+  start_replaced
+  rm -f -- "$ROOT/current-tag"
+  log "rolled back to the replaced containers; $NAME is stopped (data untouched)"
 }
 
 # A brand-new install gets a config that answers nothing and posts nothing
 # (dryRun) until its owner picks rooms. Its admin password is generated by the
-# app itself on first start (see show_first_password).
+# app itself on first start (see show_first_password). An existing
+# installation's files are used exactly as they are.
 first_install() {
-  local release="$1" config="$ROOT/config/bots/bot-1.json"
+  local release="$1" config="$DATA/config/bots/bot-1.json"
   if [[ ! -f "$config" ]]; then
     sed -e 's/"dedicatedRooms": \[[^]]*\]/"dedicatedRooms": []/' \
       -e "s/\"slotBudget\": [0-9]*/\"slotBudget\": ${LFR_SLOT_BUDGET:-1}/" \
       "$release/config/bots/bot-1.example.json" >"$config"
+    chown "$UID_GID" "$config"
     log "created $config (dryRun: true — nothing is posted until you set it to false)"
   fi
-  chmod 600 "$ROOT/.env" 2>/dev/null || true
+  chmod 600 "$DATA/.env" 2>/dev/null || true
 }
 
 port_guard() {
   local running
   running="$(docker ps --filter "name=^${NAME}$" --format '{{.Names}}' || true)"
-  if [[ -z "$running" ]] && ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
-    die "port $PORT is already used by something that is not $NAME: $(ss -ltnp "sport = :$PORT" | tail -1)"
+  if ((${#REPLACE[@]} > 0)); then
+    docker inspect "${REPLACE[@]}" >/dev/null 2>&1 || die "no such container among: ${REPLACE[*]}"
+    return 0
+  fi
+  if [[ -z "$running" ]] && port_busy; then
+    die "port $PORT is already used by something that is not $NAME: $(ss -ltnp "sport = :$PORT" | tail -1)
+  If that is an older installation this release should take over, name its containers:
+    LFR_REPLACE=<names>  (deploy-docker.ps1 -Replace <names> -DataRoot <its data dir>)"
   fi
 }
 
@@ -112,7 +185,7 @@ firewall_hint() {
 # The app writes a generated first admin password beside the accounts file,
 # owner-only. Show it to whoever is deploying, once, while it still exists.
 show_first_password() {
-  local file="$ROOT/.control/initial-admin-password.txt"
+  local file="$DATA/.control/initial-admin-password.txt"
   [[ -f "$file" ]] || return 0
   log '────────────────────────────────────────────────────────────'
   log "first admin login:  admin / $(cat "$file")"
@@ -146,22 +219,35 @@ TAG="${COMMIT:0:12}"
 RELEASE="$ROOT/releases/$TAG"
 
 port_guard
-mkdir -p "$ROOT/config/bots" "$ROOT/.sessions" "$ROOT/.control" "$ROOT/releases"
+mkdir -p "$ROOT/releases"
+for dir in config config/bots .sessions .control; do
+  [[ -d "$DATA/$dir" ]] && continue
+  mkdir -p "$DATA/$dir"
+  chown "$UID_GID" "$DATA/$dir"
+done
+printf '%s\n' "$DATA" >"$ROOT/data-root"
 rm -rf -- "$RELEASE"
 mkdir -p "$RELEASE"
 tar -xf "$ARCHIVE" -C "$RELEASE"
 first_install "$RELEASE"
-chown -R "$UID_GID" "$ROOT/config" "$ROOT/.sessions" "$ROOT/.control"
 
-log "building $IMAGE:$TAG"
+log "building $IMAGE:$TAG (the running service is untouched until this finishes)"
+# The image's own user matches the owner of the data, so the Deno cache it
+# ships is writable at run time. A root-owned installation runs as root and
+# keeps the image's default user for the cache (root can write it anyway).
+user_args=()
+if [[ "${UID_GID%%:*}" != 0 ]]; then
+  user_args=(--build-arg "APP_UID=${UID_GID%%:*}" --build-arg "APP_GID=${UID_GID##*:}")
+fi
 docker build --network host -t "$IMAGE:$TAG" \
   --build-arg "GIT_COMMIT=$COMMIT" \
   --build-arg "BUILT_AT_MS=$(date +%s%3N)" \
-  --build-arg "APP_UID=${UID_GID%%:*}" --build-arg "APP_GID=${UID_GID##*:}" \
+  "${user_args[@]}" \
   "$RELEASE"
 
 before="$(current_tag)"
-log "starting $NAME on port $PORT"
+stop_replaced
+log "starting $NAME on port $PORT (data: $DATA, user $UID_GID)"
 # `up` itself can fail after the old container is already gone (bad image,
 # refused runtime setting), so its failure must reach the restore below too.
 if ! switch_to "$TAG" || ! healthy; then
@@ -171,6 +257,9 @@ if ! switch_to "$TAG" || ! healthy; then
     warn "restoring $before"
     switch_to "$before"
     healthy || warn "previous release is not healthy either"
+  elif [[ -n "$(replaced)" ]]; then
+    docker stop -t 30 "$NAME" >/dev/null 2>&1 || true
+    start_replaced
   fi
   exit 1
 fi
