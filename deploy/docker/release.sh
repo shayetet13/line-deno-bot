@@ -24,7 +24,6 @@ set -Eeuo pipefail
 
 PORT="${LFR_PORT:-8793}"
 ROOT="${LFR_ROOT:-/opt/lfr-$PORT}"
-DATA="${LFR_DATA:-$(cat "$ROOT/data-root" 2>/dev/null || printf '%s' "$ROOT")}"
 KEEP="${KEEP_RELEASES:-5}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-120}"
 IMAGE=line-first-response
@@ -43,6 +42,48 @@ docker compose version >/dev/null 2>&1 || die 'docker compose v2 is required'
 for name in "${REPLACE[@]}"; do
   [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "not a container name: $name"
 done
+
+# Where a container keeps one of the app's state directories on the host.
+mount_source() {
+  docker inspect -f "{{range .Mounts}}{{if eq .Destination \"$2\"}}{{.Source}}{{end}}{{end}}" "$1" 2>/dev/null
+}
+
+# Taking over an installation with no LFR_DATA given: read its data directory
+# from the replaced containers' own mounts, and insist that config, sessions
+# and accounts all sit side by side there — anything else needs LFR_DATA.
+detect_data() {
+  local name control
+  for name in "${REPLACE[@]}"; do
+    control="$(mount_source "$name" /app/.control)"
+    [[ -n "$control" ]] || continue
+    local parent
+    parent="$(dirname "$control")"
+    [[ "$(mount_source "$name" /app/config)" == "$parent/config" &&
+      "$(mount_source "$name" /app/.sessions)" == "$parent/.sessions" ]] ||
+      die "$name keeps config/.sessions/.control in different places — pass LFR_DATA (-DataRoot) explicitly"
+    printf '%s' "$parent"
+    return 0
+  done
+  return 3 # no replaced container mounts app state: nothing to take over
+}
+
+if [[ -n "${LFR_DATA:-}" ]]; then
+  DATA="$LFR_DATA"
+elif [[ -f "$ROOT/data-root" ]]; then
+  DATA="$(cat "$ROOT/data-root")"
+elif ((${#REPLACE[@]} > 0)); then
+  # detect_data runs in a subshell: its die() only ends that subshell, so a
+  # layout mismatch (exit 1) must stop this script here too.
+  if DATA="$(detect_data)"; then
+    log "taking over the data of ${REPLACE[*]}: $DATA"
+  else
+    rc=$?
+    ((rc == 3)) || exit 1
+    DATA="$ROOT"
+  fi
+else
+  DATA="$ROOT"
+fi
 
 # Run as whoever owns the existing state, so taking over an installation
 # never changes the ownership of its files (and the old one can come back).
