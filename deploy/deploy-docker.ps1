@@ -24,9 +24,11 @@ param(
     [string]$DataRoot,
 
     # Containers of that installation to stop (never remove) once the new
-    # image is built; comma separated. Restarted if the new one fails.
+    # image is built. Restarted if the new one fails. An array, because
+    # PowerShell reads an unquoted `a,b` as an array: -Replace a,b and
+    # -Replace "a,b" both work.
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.,-]*$')]
-    [string]$Replace,
+    [string[]]$Replace,
 
     [switch]$AllowDirty
 )
@@ -71,7 +73,7 @@ $target = "$User@$VpsHost"
 $root = "/opt/lfr-$Port"
 $remoteEnv = "LFR_PORT=$Port LFR_ROOT=$root"
 if ($DataRoot) { $remoteEnv += " LFR_DATA=$DataRoot" }
-if ($Replace) { $remoteEnv += " LFR_REPLACE=$Replace" }
+if ($Replace) { $remoteEnv += " LFR_REPLACE=" + ($Replace -join ',') }
 
 function Invoke-Remote([string]$Command) {
     & ssh @sshArgs -tt $target $Command
