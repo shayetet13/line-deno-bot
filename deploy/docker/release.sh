@@ -99,7 +99,9 @@ port_holder() {
 }
 current_tag() { cat "$ROOT/current-tag" 2>/dev/null || true; }
 previous_tag() { cat "$ROOT/previous-tag" 2>/dev/null || true; }
-replaced() { cat "$ROOT/replaced-containers" 2>/dev/null || true; }
+# One "name=restart-policy" per line, so giving the port back also gives the
+# old containers back their own restart behaviour.
+replaced() { cut -d= -f1 "$ROOT/replaced-containers" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 
 status() {
   local live prev old
@@ -129,9 +131,15 @@ switch_to() {
 # Stops the containers being taken over and waits for the port to free up.
 stop_replaced() {
   ((${#REPLACE[@]} > 0)) || return 0
-  log "stopping ${REPLACE[*]} (stopped, not removed)"
+  log "stopping ${REPLACE[*]} (stopped, not removed; restart policy off so a reboot cannot start them next to this one)"
+  : >"$ROOT/replaced-containers"
+  local name policy
+  for name in "${REPLACE[@]}"; do
+    policy="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name")"
+    printf '%s=%s\n' "$name" "${policy:-no}" >>"$ROOT/replaced-containers"
+    docker update --restart=no "$name" >/dev/null
+  done
   docker stop -t 30 "${REPLACE[@]}" >/dev/null
-  printf '%s\n' "${REPLACE[*]}" >"$ROOT/replaced-containers"
   local deadline=$((SECONDS + 15))
   while port_busy && ((SECONDS < deadline)); do sleep 1; done
   if port_busy; then
@@ -141,12 +149,15 @@ stop_replaced() {
 }
 
 start_replaced() {
-  local old
+  local old name policy
   old="$(replaced)"
   [[ -n "$old" ]] || return 0
   warn "starting the replaced containers again: $old"
-  # shellcheck disable=SC2086
-  docker start $old >/dev/null
+  while IFS='=' read -r name policy; do
+    [[ -n "$name" ]] || continue
+    [[ "${policy:-no}" != no ]] && docker update --restart="$policy" "$name" >/dev/null
+    docker start "$name" >/dev/null
+  done <"$ROOT/replaced-containers"
 }
 
 rollback() {
