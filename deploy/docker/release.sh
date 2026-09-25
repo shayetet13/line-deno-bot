@@ -62,18 +62,36 @@ compose() {
     docker compose -f "$release/deploy/docker/compose.yml" "$@"
 }
 
+# Healthy = OUR container is running without having restarted, and the port
+# answers the login page. The port alone is not enough: anything else still
+# listening there would answer too, and a container that cannot bind the port
+# exits and restarts rather than failing loudly.
 healthy() {
-  local deadline=$((SECONDS + HEALTH_TIMEOUT_S)) code
+  local deadline=$((SECONDS + HEALTH_TIMEOUT_S)) code state
   while ((SECONDS < deadline)); do
+    state="$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$NAME" 2>/dev/null || true)"
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
       "http://127.0.0.1:$PORT/account/login" || true)"
-    [[ "$code" == 200 ]] && return 0
+    [[ "$state" == "true 0" && "$code" == 200 ]] && return 0
     sleep 2
   done
   return 1
 }
 
-port_busy() { ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; }
+# Anything LISTENing on the port, on any address. /proc is the fallback for
+# hosts without iproute2's `ss`.
+port_busy() {
+  if command -v ss >/dev/null; then
+    ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN
+    return
+  fi
+  awk -v port="$(printf '%04X' "$PORT")" '
+    $4 == "0A" { n = split($2, a, ":"); if (toupper(a[n]) == port) found = 1 }
+    END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+port_holder() {
+  if command -v ss >/dev/null; then ss -ltnp "sport = :$PORT" | tail -1; else echo "(see: docker ps)"; fi
+}
 current_tag() { cat "$ROOT/current-tag" 2>/dev/null || true; }
 previous_tag() { cat "$ROOT/previous-tag" 2>/dev/null || true; }
 replaced() { cat "$ROOT/replaced-containers" 2>/dev/null || true; }
@@ -113,7 +131,7 @@ stop_replaced() {
   while port_busy && ((SECONDS < deadline)); do sleep 1; done
   if port_busy; then
     start_replaced
-    die "port $PORT is still in use after stopping ${REPLACE[*]}: $(ss -ltnp "sport = :$PORT" | tail -1)"
+    die "port $PORT is still in use after stopping ${REPLACE[*]}: $(port_holder)"
   fi
 }
 
@@ -171,7 +189,7 @@ port_guard() {
     return 0
   fi
   if [[ -z "$running" ]] && port_busy; then
-    die "port $PORT is already used by something that is not $NAME: $(ss -ltnp "sport = :$PORT" | tail -1)
+    die "port $PORT is already used by something that is not $NAME: $(port_holder)
   If that is an older installation this release should take over, name its containers:
     LFR_REPLACE=<names>  (deploy-docker.ps1 -Replace <names> -DataRoot <its data dir>)"
   fi
